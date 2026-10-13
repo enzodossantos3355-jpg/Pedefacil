@@ -1,0 +1,136 @@
+{
+  "project_context": {
+    "app_name": "Marmita Hub / Feijoada Platform",
+    "app_type": "Dashboard / SaaS App (Gestão Operacional de Marmitaria e Restaurantes)",
+    "target_audience": "Restaurantes, marmitarias, operações de alimentação, atendentes e administradores de pedidos",
+    "core_vibe": "Organic, warm, efficient, organized, reliable, tactile food management",
+    "language": "pt-BR"
+  },
+  "theme_and_archetype": {
+    "mode": "light",
+    "archetype": "1 (Organic & Earthy)",
+    "reasoning": "A food operations dashboard should feel warm, inviting, and operational without feeling like a sterile cold portal. Warm terracotta/burnt orange accents paired with stone warm grays evoke a cozy kitchen environment."
+  },
+  "typography": {
+    "font_families": {
+      "headings": "Work Sans, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "IBM Plex Mono, monospace"
+    },
+    "rules": {
+      "anti_default": "Never use Inter, Roboto, or Space Grotesk for headings.",
+      "hierarchy": {
+        "h1": "text-3xl sm:text-4xl tracking-tight font-semibold text-stone-900",
+        "h2": "text-2xl sm:text-3xl tracking-tight font-medium text-stone-800",
+        "h3": "text-xl sm:text-2xl font-medium text-stone-800",
+        "h4": "text-lg font-medium text-stone-800",
+        "body": "text-base text-stone-600 leading-relaxed",
+        "small_labels": "text-xs tracking-[0.1em] uppercase font-semibold text-stone-500"
+      }
+    }
+  },
+  "colors": {
+    "palette": {
+      "background": {
+        "main": "#F9F8F6",
+        "card": "#FFFFFF",
+        "sidebar": "#F4F2EF"
+      },
+      "text": {
+        "primary": "#1C1917",
+        "secondary": "#57534E",
+        "muted": "#A8A29E"
+      },
+      "brand": {
+        "primary": "#C5533B",
+        "primary_hover": "#A6432E",
+        "accent": "#E28B61"
+      },
+      "status": {
+        "success": "#6B8E7B",
+        "success_bg": "#EEF3F0",
+        "warning": "#D99A45",
+        "warning_bg": "#FDF6EA",
+        "danger": "#B94B4B",
+        "danger_bg": "#FCEDED",
+        "info": "#4A6E8C",
+        "info_bg": "#EFF4F8"
+      },
+      "borders": "#E7E5E4"
+    },
+    "forbidden_colors": ["#9D4CDD", "#1B93A4", "#7351B7", "pure #000000"],
+    "rules": {
+      "tints": "Never use pure grey #000000 or neutral #808080. Tint neutrals with warm stone or warm amber tones.",
+      "contrast": "Text below 18px must have at least 4.5:1 ratio against background. Always set explicit hover text colors."
+    }
+  },
+  "spacing_and_layout": {
+    "system": "Tailwind standard scale (p-2, p-4, p-6, p-8, p-12).",
+    "dashboard_grid": {
+      "type": "Control Room Grid & Responsive Kanban/List view",
+      "rules": "Dense, scan-first operational layout. Top metrics showing live revenue, active orders, pending dispatch, and item counts. Use gap-4 or gap-6 for control widgets.",
+      "cards": "Subtle roundness (rounded-xl max). 1px border-stone-200. Ambient shadow (shadow-sm). Use flat lists where density is high."
+    }
+  },
+  "components": {
+    "ui_library": "shadcn/ui (customized with warm stone palette)",
+    "icons": {
+      "library": "@phosphor-icons/react or lucide-react",
+      "style": "duotone or regular"
+    },
+    "specific_customizations": {
+      "buttons": "rounded-lg, font-medium. Primary buttons use #C5533B with clear hover states.",
+      "inputs": "rounded-lg, border-stone-300, focus:ring-2 focus:ring-[#C5533B]/20 focus:border-[#C5533B].",
+      "badges": "Order Status Badges: Novo (Info), Em Preparo (Warning), Pronto (Success), Em Entrega (Brand/Accent), Concluído (Neutral Dark), Cancelado (Danger).",
+      "tables": "Border-collapse with border-b border-stone-200. Left-align text, right-align numbers and prices.",
+      "dialogs": "Soft backdrop blur with bg-stone-900/40."
+    }
+  },
+  "motion": {
+    "rules": "Functional micro-interactions. Fast transitions for hover states (duration-200 ease-in-out). Respect prefers-reduced-motion.",
+    "hover_states": "Interactive buttons, nav items, and table rows must change background color smoothly."
+  },
+  "assets": {
+    "images": {
+      "login_background": {
+        "url": "https://static.prod-images.emergentagent.com/jobs/3902cf64-244c-4c85-b121-742028aab87f/images/cac5a669c2b1c379a713fded35cbcba22131ce47bdb6e0457b5e90a0ddec9160.png",
+        "usage": "Full-bleed background for authentication split screen with warm overlay."
+      },
+      "product_placeholders": [
+        {
+          "url": "https://images.pexels.com/photos/34234280/pexels-photo-34234280.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+          "usage": "Feijoada Completa marmita dish thumbnail"
+        },
+        {
+          "url": "https://images.pexels.com/photos/34234277/pexels-photo-34234277.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+          "usage": "Marmita Executiva / Feijoada dish thumbnail"
+        },
+        {
+          "url": "https://images.pexels.com/photos/30635705/pexels-photo-30635705.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+          "usage": "Bento box / Marmita product thumbnail"
+        },
+        {
+          "url": "https://images.pexels.com/photos/30635717/pexels-photo-30635717.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+          "usage": "Meal prep / Marmita thumbnail"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1626379907504-327b925f4b79?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTF8MHwxfHNlYXJjaHwzfHxicmF6aWxpYW4lMjBoZWFsdGh5JTIwZm9vZCUyMG1lYWwlMjBwcmVwfGVufDB8fHx8MTc4MDIzNjUxMnww&ixlib=rb-4.1.0&q=85",
+          "usage": "General food dish thumbnail"
+        }
+      ]
+    }
+  },
+  "instructions_to_main_agent": {
+    "tech_stack": "React.js (.js/.jsx files only, NO TypeScript), Tailwind CSS, shadcn/ui.",
+    "testing_requirements": "CRITICAL: All interactive and key informational elements MUST include a 'data-testid' attribute (e.g., data-testid='login-submit-button', data-testid='order-status-badge').",
+    "architecture": "Build a responsive layout with fixed/collapsible left Sidebar for desktop and drawer/bottom nav for mobile. Active order queue with Kanban or tabbed List view.",
+    "language": "All UI text, labels, statuses, error messages, and dummy data MUST be in Brazilian Portuguese (pt-BR).",
+    "shadcn_usage": "Do NOT use raw HTML <select> or <input type='date'>. Always use shadcn/ui DropdownMenu, Select, Calendar, Dialog, Tabs, etc.",
+    "mock_data": "Use the provided image URLs for product photos. Do not use generic placeholders like via.placeholder.com."
+  },
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": {
+    "data_testid_rule": "Every button, input, tab, badge, table row action, modal trigger, and link MUST have a data-testid attribute in kebab-case.",
+    "contrast_rule": "Ensure 4.5:1 text contrast ratio on all buttons and labels.",
+    "responsive_rule": "Desktop and mobile navigation must be fully responsive and seamless."
+  }
+}
