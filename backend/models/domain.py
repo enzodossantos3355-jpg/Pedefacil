@@ -477,3 +477,24 @@ class AppNotification(BaseModel):
     detail: str
     link: str
     created_at: datetime
+
+
+class CourierEarning(BaseModel):
+    courier_id: str
+    name: str
+    deliveries: int
+    fees: float
+
+
+class DayClose(BaseModel):
+    close_id: str
+    created_at: datetime
+    revenue: float = 0
+    total_orders: int = 0
+    avg_ticket: float = 0
+    couriers: list[CourierEarning] = []
+    chats_deleted: int = 0
+
+
+class DayCloseDetail(DayClose):
+    orders: list[Order] = []

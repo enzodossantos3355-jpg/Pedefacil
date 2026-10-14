@@ -19,7 +19,7 @@ from lib.tastes import all_profiles
 from models.domain import (
     LEGACY_STATUS, STATUS_FLOW, Courier, CourierCreate, Customer, CustomerCreate, DashboardSummary, DayOpenRequest, DayStatus,
     DeliveryZone, DeliveryZoneCreate, FeeQuote, FeeQuoteResult, Order, OrderCreate, OrderUpdate, Product,
-    AppNotification, PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
+    AppNotification, CourierEarning, DayClose, DayCloseDetail, PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
 )
 import os
 
@@ -89,7 +89,8 @@ async def dashboard():
 
 @router.get("/orders", response_model=list[Order])
 async def list_orders():
-    return await all_orders()
+    """Only the current (not yet archived) day; archived days live in Armazenamento."""
+    return [Order(**d) for d in await db.orders.find({"archived": {"$ne": True}}).sort("created_at", -1).to_list(2000)]
 
 
 async def pix_code_for(total: float, order_id: str) -> str:
@@ -168,9 +169,9 @@ async def notify_status(order: Order) -> None:
 async def notifications():
     """Panel bell: new orders waiting, conversations asking for a human, Pix receipts to check."""
     out: list[AppNotification] = []
-    for o in await db.orders.find({"status": {"$in": ["Em Análise", "Novo"]}}).sort("created_at", -1).to_list(30):
+    for o in await db.orders.find({"status": {"$in": ["Em Análise", "Novo"]}, "archived": {"$ne": True}}).sort("created_at", -1).to_list(30):
         out.append(AppNotification(id=f"o-{o['order_id']}-{o['status']}", kind="new_order", title=f"Pedido #{o['order_id'][-6:].upper()} · {o['status']}", detail=f"{o['customer_name']} · R$ {o['total']:.2f}", link="/pedidos", created_at=o["created_at"]))
-    for o in await db.orders.find({"payment_status": "em_verificacao"}).to_list(30):
+    for o in await db.orders.find({"payment_status": "em_verificacao", "archived": {"$ne": True}}).to_list(30):
         out.append(AppNotification(id=f"r-{o['order_id']}", kind="receipt", title=f"Comprovante para conferir · #{o['order_id'][-6:].upper()}", detail=o.get("receipt_note", "")[:120], link="/pedidos", created_at=o["created_at"]))
     for c in await db.chats.find({"status": "needs_human"}).to_list(30):
         out.append(AppNotification(id=f"h-{c['chat_id']}-{len(c.get('messages', []))}", kind="needs_human", title=f"{c['customer_name']} pediu um atendente", detail=c.get("last_message", "")[:120], link="/atendimento", created_at=c.get("last_timestamp") or c.get("created_at")))
@@ -361,12 +362,25 @@ async def quote_zone(input: FeeQuote):
 async def list_couriers():
     today = today_iso()
     couriers = [Courier(**d) for d in await db.couriers.find().sort("name", 1).to_list(500)]
-    orders = await all_orders()
-    for c in couriers:
-        mine = [o for o in orders if o.courier_id == c.courier_id and o.delivery_type == "Entrega" and o.created_at.strftime("%Y-%m-%d") == today and o.status in ("Em Entrega", "Concluído")]
-        c.deliveries_today, c.fees_today = len(mine), round(sum(o.delivery_fee for o in mine), 2)
+    current = [Order(**o) for o in await db.orders.find({"archived": {"$ne": True}}).to_list(5000)]
+    by_id = {e.courier_id: e for e in await courier_earnings(current)}
+    for c in couriers:  # balance of the open day; resets when the day is closed (archived in the close)
+        e = by_id.get(c.courier_id)
+        c.deliveries_today, c.fees_today = (e.deliveries, e.fees) if e else (0, 0.0)
         c.working_today = c.working_date == today
     return couriers
+
+
+async def courier_earnings(orders: list[Order]) -> list[CourierEarning]:
+    """Each delivery that left/finished adds its zone fee to the courier's balance."""
+    names = {c["courier_id"]: c["name"] for c in await db.couriers.find().to_list(500)}
+    out: dict[str, CourierEarning] = {}
+    for o in orders:
+        if o.courier_id and o.delivery_type == "Entrega" and o.status in ("Em Entrega", "Concluído"):
+            e = out.setdefault(o.courier_id, CourierEarning(courier_id=o.courier_id, name=names.get(o.courier_id, "Entregador removido"), deliveries=0, fees=0))
+            e.deliveries += 1
+            e.fees = round(e.fees + o.delivery_fee, 2)
+    return list(out.values())
 
 
 @router.post("/couriers/{courier_id}/working", response_model=Courier, dependencies=[need("motoboys")])
@@ -420,15 +434,32 @@ async def open_day(input: DayOpenRequest = DayOpenRequest()):
 
 @router.post("/day/close", response_model=DayStatus)
 async def close_day():
+    """Archives everything of the day: orders + courier earnings go to Armazenamento, WhatsApp conversations are deleted."""
     s = await day_status()
-    await db.day_closes.insert_one({"close_id": new_id("close"), "created_at": datetime.now(timezone.utc), "revenue": s.revenue, "total_orders": s.total_orders, "avg_ticket": s.revenue / s.total_orders if s.total_orders else 0})
+    close_id = new_id("close")
+    current = await db.orders.find({"archived": {"$ne": True}}).to_list(5000)
+    earnings = await courier_earnings([Order(**o) for o in current])
+    chats_deleted = (await db.chats.delete_many({})).deleted_count
+    await db.day_closes.insert_one({"close_id": close_id, "created_at": datetime.now(timezone.utc), "revenue": s.revenue, "total_orders": s.total_orders, "avg_ticket": s.revenue / s.total_orders if s.total_orders else 0,
+                                    "couriers": [e.model_dump() for e in earnings], "chats_deleted": chats_deleted})
+    await db.orders.update_many({"archived": {"$ne": True}}, {"$set": {"archived": True, "close_id": close_id}})
+    await db.couriers.update_many({}, {"$set": {"working_date": ""}})  # pick who works again on the next day
     updated = await db.day_status.find_one_and_update({}, {"$set": {"is_open": False, "day_state": "closed"}}, return_document=ReturnDocument.AFTER)
     return DayStatus(**updated)
 
 
-@router.get("/day/closes")
+@router.get("/day/closes", response_model=list[DayClose])
 async def list_closes():
-    return await db.day_closes.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return [DayClose(**d) for d in await db.day_closes.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)]
+
+
+@router.get("/day/closes/{close_id}", response_model=DayCloseDetail)
+async def close_detail(close_id: str):
+    d = await db.day_closes.find_one({"close_id": close_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(status_code=404, detail="Fechamento não encontrado.")
+    orders = [Order(**o) for o in await db.orders.find({"close_id": close_id}).sort("created_at", -1).to_list(5000)]
+    return DayCloseDetail(**d, orders=orders)
 
 
 @router.get("/reports/summary", response_model=ReportSummary)

@@ -224,16 +224,16 @@ def price_items(raw_items: list[dict], products: dict[str, dict]) -> list[OrderI
     return items
 
 
-OPEN_STATUSES = {"$nin": ["Concluído", "Cancelado"]}
+OPEN_STATUSES = {"$nin": ["Concluído", "Cancelado"]}  # archived (closed-day) orders are never edited
 
 
 async def linked_order(doc: dict, phone: str) -> dict | None:
     """The order this conversation is working on: the chat's linked order if still open, else the latest open one."""
     if doc.get("order_id"):
-        o = await db.orders.find_one({"order_id": doc["order_id"], "status": OPEN_STATUSES})
+        o = await db.orders.find_one({"order_id": doc["order_id"], "status": OPEN_STATUSES, "archived": {"$ne": True}})
         if o:
             return o
-    return await db.orders.find_one({"customer_phone": phone, "source": "whatsapp", "status": OPEN_STATUSES}, sort=[("created_at", -1)])
+    return await db.orders.find_one({"customer_phone": phone, "source": "whatsapp", "status": OPEN_STATUSES, "archived": {"$ne": True}}, sort=[("created_at", -1)])
 
 
 async def handle_receipt(input: IncomingMessage, doc: dict, phone: str, to: str, settings: dict) -> Chat | None:

@@ -310,3 +310,24 @@ export interface AppNotification {
   link: string;
   created_at: string;
 }
+
+export interface CourierEarning {
+  courier_id: string;
+  name: string;
+  deliveries: number;
+  fees: number;
+}
+
+export interface DayClose {
+  close_id: string;
+  created_at: string;
+  revenue: number;
+  total_orders: number;
+  avg_ticket: number;
+  couriers: CourierEarning[];
+  chats_deleted: number;
+}
+
+export interface DayCloseDetail extends DayClose {
+  orders: Order[];
+}
