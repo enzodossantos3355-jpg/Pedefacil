@@ -11,9 +11,10 @@ from lib.ai import wa_send
 from lib.dates import today_iso
 from lib.access import check_limit, has_feature, need
 from lib.db import db, raw_db
-from lib.tenant import TENANT_COLLECTIONS, current_store
+
 from lib.geo import coords_from_text, geocode_address, quote_fee_full
 from lib.pix import gerar_pix
+from lib.tastes import all_profiles
 from models.domain import (
     LEGACY_STATUS, STATUS_FLOW, Courier, CourierCreate, Customer, CustomerCreate, DashboardSummary, DayOpenRequest, DayStatus,
     DeliveryZone, DeliveryZoneCreate, FeeQuote, FeeQuoteResult, Order, OrderCreate, OrderUpdate, Product,
@@ -45,45 +46,6 @@ async def require_open_day() -> None:
 
 
 OPEN_DAY = [Depends(require_open_day)]
-
-
-async def seed_demo_data() -> None:
-    """Existing single-store data becomes the demo restaurant (active Pro plan), then the demo is seeded."""
-    for name in TENANT_COLLECTIONS:
-        await raw_db[name].update_many({"store_id": {"$exists": False}}, {"$set": {"store_id": "store-demo"}})
-    await raw_db.users.update_many({"store_id": {"$exists": False}, "role": {"$ne": "master"}}, {"$set": {"store_id": "store-demo"}})
-    await raw_db.stores.update_one({"store_id": "store-demo"}, {"$setOnInsert": {"store_id": "store-demo", "name": "Restaurante Demo", "owner_email": "admin@pedefacil.com", "plan": "pro", "status": "active", "trial_ends_at": None, "current_period_end": None, "created_at": datetime.now(timezone.utc)}}, upsert=True)
-    current_store.set("store-demo")
-    for old, new in LEGACY_STATUS.items():
-        await db.orders.update_many({"status": old}, {"$set": {"status": new}})
-    if await db.products.count_documents({}) == 0:
-        await db.products.insert_many([
-            Product(product_id="prod-tradicional", name="Marmita Tradicional", category="Marmita", price=22.9, description="Arroz soltinho, feijão cremoso, proteína do dia, farofa e salada.", image_url=IMG[0], sizes=[{"name": "P", "price": 18.9}, {"name": "M", "price": 22.9}, {"name": "G", "price": 27.9}], additionals=[{"name": "Ovo frito", "price": 3}, {"name": "Bacon", "price": 4}], stock=40).model_dump(),
-            Product(product_id="prod-executiva", name="Marmita Executiva", category="Marmita", price=31.9, description="Bife acebolado com guarnições frescas.", image_url=IMG[1], stock=25).model_dump(),
-            Product(product_id="prod-suco", name="Suco Natural 500ml", category="Bebida", price=8.5, description="Suco natural preparado na hora.", image_url="https://images.unsplash.com/photo-1626379907504-327b925f4b79?auto=format&fit=crop&w=600&q=80").model_dump(),
-        ])
-    if await db.orders.count_documents({}) == 0:
-        await db.orders.insert_many([
-            Order(order_id="ord-demo01", customer_name="Mariana Costa", customer_phone="5511988887777", delivery_type="Entrega", address="Rua das Palmeiras, 45", payment_method="Pix", items=[{"product_id": "prod-tradicional", "name": "Marmita Tradicional", "size": "M", "price": 22.9, "quantity": 2}], subtotal=45.8, delivery_fee=5, total=50.8, status="Em Preparo").model_dump(),
-            Order(order_id="ord-demo02", customer_name="Rafael Lima", customer_phone="5511977776666", delivery_type="Retirada", payment_method="Cartão Crédito", items=[{"product_id": "prod-executiva", "name": "Marmita Executiva", "price": 31.9, "quantity": 1}], subtotal=31.9, total=31.9, status="Novo").model_dump(),
-            Order(order_id="ord-demo03", customer_name="Bianca Souza", customer_phone="5511966665555", delivery_type="Entrega", address="Av. Brasil, 120", payment_method="Pix", items=[{"product_id": "prod-tradicional", "name": "Marmita Tradicional", "size": "G", "price": 27.9, "quantity": 1}], subtotal=27.9, delivery_fee=6, total=33.9, status="Em Análise", source="whatsapp").model_dump(),
-        ])
-    if await db.customers.count_documents({}) == 0:
-        await db.customers.insert_many([
-            Customer(customer_id="cust-demo01", name="Mariana Costa", phone="5511988887777", address="Rua das Palmeiras, 45", orders_count=4, total_spent=168.6, preferences=["Sem cebola"]).model_dump(),
-            Customer(customer_id="cust-demo02", name="Rafael Lima", phone="5511977776666", address="Retirada no balcão", orders_count=2, total_spent=64.8).model_dump(),
-        ])
-    if await db.delivery_zones.count_documents({}) == 0:
-        await db.delivery_zones.insert_many([
-            DeliveryZone(zone_id="zone-centro", name="Centro", fee=5, kind="keyword", keywords=["centro", "sé", "república"]).model_dump(),
-            DeliveryZone(zone_id="zone-raio3", name="Até 3 km", fee=6, kind="radius", radius_km=3).model_dump(),
-        ])
-    if await db.couriers.count_documents({}) == 0:
-        await db.couriers.insert_one(Courier(courier_id="moto-demo01", name="Carlos Entregas", phone="5511955554444").model_dump())
-    if await db.store_settings.count_documents({}) == 0:
-        await db.store_settings.insert_one(StoreSettings(pix_key="11999998888", pix_beneficiary="Restaurante Demo").model_dump())
-    if await db.day_status.count_documents({}) == 0:
-        await db.day_status.insert_one(DayStatus(opened_at=datetime.now(timezone.utc)).model_dump())
 
 
 async def get_settings() -> dict:
@@ -262,7 +224,8 @@ async def delete_product(product_id: str):
 
 @router.get("/customers", response_model=list[Customer])
 async def list_customers():
-    return [Customer(**d) for d in await db.customers.find().sort("name", 1).to_list(2000)]
+    profiles = await all_profiles()
+    return [Customer(**{**d, **profiles.get(d.get("phone", ""), {})}) for d in await db.customers.find().sort("name", 1).to_list(2000)]
 
 
 @router.post("/customers", response_model=Customer)

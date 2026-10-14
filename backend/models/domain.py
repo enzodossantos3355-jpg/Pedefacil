@@ -200,17 +200,22 @@ class Customer(CustomerCreate):
     orders_count: int = 0
     total_spent: float = 0
     addresses: list[str] = []
-    preferences: list[str] = []
+    preferences: list[str] = []  # restrictions/likes detected by the AI in conversations
+    favorites: list[str] = []  # learned from order history (computed, not stored)
+    usual_additionals: list[str] = []
+    usual_delivery: str = ""
+    usual_payment: str = ""
+    last_order: str = ""
 
 
 class StoreSettings(BaseModel):
     accepting_orders: bool = True
-    store_name: str = "Restaurante Demo"
-    store_address: str = "Rua do Sabor, 150 - Centro, São Paulo - SP"
+    store_name: str = "Minha Loja"
+    store_address: str = ""
     store_maps_url: str = ""
-    store_lat: float | None = -23.5505
-    store_lng: float | None = -46.6333
-    business_hours: str = "Segunda a sábado, das 10h30 às 15h"
+    store_lat: float | None = None
+    store_lng: float | None = None
+    business_hours: str = ""
     closed_message: str = "Nosso expediente está encerrado no momento. Voltamos no próximo horário de atendimento!"
     pix_key_type: str = "Celular"
     pix_key: str = ""

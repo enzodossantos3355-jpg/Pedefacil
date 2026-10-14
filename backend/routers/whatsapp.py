@@ -14,6 +14,7 @@ from lib.db import db
 from lib.geo import coords_from_text, find_cep, quote_fee_full
 from lib.pix import gerar_pix
 from lib.stt import transcribe_audio
+from lib.tastes import taste_profile
 from models.domain import (
     Chat, ChatMessage, DescriptionRequest, HumanToggle, IncomingMessage, MessageCreate, Order, OrderCreate,
     OrderItem, SimulateMessage, TextRequest, WhatsAppStart, now_utc,
@@ -113,7 +114,7 @@ async def toggle_human(chat_id: str, input: HumanToggle):
     return await chat_with_order(doc)
 
 
-def build_system(settings: dict, products: list[dict], zones: list[dict], customer: dict | None, fee_note: str) -> str:
+def build_system(settings: dict, products: list[dict], zones: list[dict], customer: dict | None, fee_note: str, tastes: dict | None = None) -> str:
     def fmt(options: list[dict]) -> str:
         return ", ".join("{} R$ {:.2f}".format(o["name"], o["price"]) for o in options)
 
@@ -126,16 +127,29 @@ def build_system(settings: dict, products: list[dict], zones: list[dict], custom
     )
     zone_txt = "\n".join(f"- {z['name']}: R$ {z['fee']:.2f}" for z in zones) or "- taxa padrão"
     prefs = ", ".join((customer or {}).get("preferences", [])) or "nenhuma registrada"
+    t = tastes or {}
+    tastes_txt = "\n".join(line for line in [
+        f"- Pratos favoritos: {', '.join(t['favorites'])}" if t.get("favorites") else "",
+        f"- Adicionais que costuma pedir: {', '.join(t['usual_additionals'])}" if t.get("usual_additionals") else "",
+        f"- Costuma pedir para: {t['usual_delivery']}" if t.get("usual_delivery") else "",
+        f"- Costuma pagar com: {t['usual_payment']}" if t.get("usual_payment") else "",
+        f"- Último pedido: {t['last_order']}" if t.get("last_order") else "",
+    ] if line) or "- cliente novo, sem histórico"
     return f"""Você é o atendente virtual do restaurante "{settings['store_name']}" no WhatsApp. Responda em português do Brasil, de forma natural, curta, simpática e direta.
-Endereço da loja: {settings['store_address']} {settings['store_maps_url']}
-Horários: {settings['business_hours']}
+Endereço da loja: {(settings['store_address'] + ' ' + settings['store_maps_url']).strip() or 'não cadastrado (NÃO invente; diga que a equipe confirma)'}
+Horários: {settings['business_hours'] or 'não cadastrado (NÃO invente)'}
 Pix: {settings['pix_key_type']} {settings['pix_key']} ({settings['pix_beneficiary']})
 CARDÁPIO DISPONÍVEL:
 {menu}
 ZONAS DE ENTREGA:
 {zone_txt}
 {fee_note}
-Cliente: {(customer or {}).get('name', 'novo cliente')} — {'cliente recorrente com ' + str(customer.get('orders_count', 0)) + ' pedido(s)' if customer and customer.get('orders_count') else 'primeiro contato'}. Preferências conhecidas: {prefs}. Último endereço: {(customer or {}).get('address', '') or 'não informado'}.
+Cliente: {(customer or {}).get('name', 'novo cliente')} — {'cliente recorrente com ' + str(customer.get('orders_count', 0)) + ' pedido(s)' if customer and customer.get('orders_count') else 'primeiro contato'}. Preferências e restrições conhecidas: {prefs}. Último endereço: {(customer or {}).get('address', '') or 'não informado'}.
+GOSTOS DO CLIENTE (aprendidos do histórico de pedidos):
+{tastes_txt}
+- Use os gostos para personalizar: a um cliente recorrente, ofereça de forma natural "o de sempre" (o último pedido ou o favorito, com os adicionais de costume). Se ele disser "o de sempre"/"o mesmo", feche esse pedido na hora.
+- Respeite SEMPRE as restrições (ex.: vegetariano, sem cebola): não ofereça itens que as contrariem e coloque a restrição nas observações do pedido.
+- Se o cliente revelar um gosto ou restrição nova (ex.: "não como carne", "amo farofa"), registre em "preferences".
 REGRAS:
 - Mensagens CURTAS no estilo WhatsApp: no máximo 2 a 3 linhas. Nada de blocos longos.
 - Na primeira mensagem, cumprimente pelo nome; se for recorrente, mostre que reconhece ("que bom te ver de novo").
@@ -255,7 +269,7 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
         fee_note = f"LOCALIZAÇÃO/CEP RECEBIDO: confirme com gentileza, informe a taxa e, se faltar, peça só o complemento. Taxa de entrega calculada R$ {q['fee']:.2f}" + (f" (zona {q['zone_name']})" if q["zone_name"] else " (fora das zonas: taxa padrão)")
     history = "\n".join(f"{m['sender']}: {m['text']}" for m in doc["messages"][-14:])
     try:
-        raw = await ask_llm(f"wa-{chat_id}", build_system(settings, products, zones, customer, fee_note), f"Conversa até agora:\n{history}\n\nResponda à última mensagem do cliente.")
+        raw = await ask_llm(f"wa-{chat_id}", build_system(settings, products, zones, customer, fee_note, await taste_profile(phone)), f"Conversa até agora:\n{history}\n\nResponda à última mensagem do cliente.")
         data = extract_reply(raw)
     except Exception as exc:
         logger.error("LLM falhou: %s", exc)

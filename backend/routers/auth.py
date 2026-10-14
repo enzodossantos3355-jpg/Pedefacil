@@ -1,4 +1,5 @@
 import hashlib
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -10,13 +11,6 @@ from lib.plans import TRIAL_DAYS
 from models.domain import DayStatus, LoginRequest, StoreSettings, TeamMember, TeamMemberCreate, User, UserCreate, new_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-DEMO_STORE = "store-demo"
-DEMO_USERS = {
-    "admin@pedefacil.com": ("Administrador da Loja", "admin", "marmita123"),
-    "atendente@pedefacil.com": ("Atendente da Loja", "atendente", "marmita123"),
-    "master@pedefacil.com": ("Dono do PedeFácil", "master", "master123"),
-}
-
 
 def password_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -27,11 +21,18 @@ async def public_user(doc: dict) -> User:
     return User(id=doc["id"], name=doc["name"], email=doc["email"], role=doc.get("role", "admin"), store_id=doc.get("store_id", ""), store_name=(store or {}).get("name", ""))
 
 
-async def ensure_demo_users() -> None:
-    for email, (name, role, pwd) in DEMO_USERS.items():
-        doc = {"id": f"demo-{role}", "name": name, "email": email, "role": role, "password_hash": password_hash(pwd),
-               "store_id": "" if role == "master" else DEMO_STORE, "created_at": datetime.now(timezone.utc)}
-        await raw_db.users.update_one({"email": email}, {"$setOnInsert": doc}, upsert=True)
+async def ensure_master() -> None:
+    """The PedeFácil owner account comes from backend/.env (MASTER_EMAIL / MASTER_PASSWORD)."""
+    email = os.environ.get("MASTER_EMAIL", "").lower().strip()
+    password = os.environ.get("MASTER_PASSWORD", "")
+    if not email or not password:
+        return
+    await raw_db.users.update_one(
+        {"email": email},
+        {"$set": {"role": "master", "store_id": "", "password_hash": password_hash(password)},
+         "$setOnInsert": {"id": new_id("user"), "name": "Dono do PedeFácil", "email": email, "created_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
 
 
 async def start_session(response: Response, user: dict) -> None:
@@ -64,8 +65,6 @@ async def register(input: UserCreate, response: Response):
 @router.post("/login", response_model=User)
 async def login(input: LoginRequest, response: Response):
     email = input.email.lower().strip()
-    if email in DEMO_USERS:
-        await ensure_demo_users()
     user = await raw_db.users.find_one({"email": email})
     if not user or user.get("password_hash") != password_hash(input.password):
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")

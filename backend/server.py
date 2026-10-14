@@ -14,7 +14,8 @@ load_dotenv(ROOT_DIR / '.env')
 # MongoDB connection
 from lib.db import client, db, ensure_indexes
 from routers.auth import router as auth_router
-from routers.operations import router as operations_router, seed_demo_data
+from routers.operations import router as operations_router
+from routers.auth import ensure_master
 from routers.whatsapp import internal_router as whatsapp_internal_router, open_router as whatsapp_open_router, router as whatsapp_router
 from routers.billing import router as billing_router
 from routers.tables import router as tables_router
@@ -27,7 +28,7 @@ from lib.access import active_store, need
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.index_task = asyncio.create_task(ensure_indexes())  # background: a big index build must not block boot
-    app.state.seed_task = asyncio.create_task(seed_demo_data())
+    app.state.seed_task = asyncio.create_task(ensure_master())
     yield
     client.close()
 

@@ -90,7 +90,6 @@ export default function Login() {
         <div><Label htmlFor="login-password">Senha</Label><Input id="login-password" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1.5 bg-white" data-testid="login-password-input" /></div>
         <Button type="submit" disabled={login.isPending} className="w-full bg-[#C5533B] hover:bg-[#A6432E]" data-testid="login-submit-button">{login.isPending ? "Entrando..." : "Entrar"}</Button>
       </form>
-      <button type="button" onClick={() => { setEmail("admin@pedefacil.com"); setPassword("marmita123"); }} className="rounded-xl border border-stone-200 bg-white p-3 text-left text-xs text-stone-600 hover:bg-stone-50" data-testid="demo-login-hint"><strong className="block text-stone-900">Usar acesso de demonstração</strong>admin@pedefacil.com · marmita123</button>
       <p className="text-center text-sm text-stone-500">Ainda não tem conta? <Link to="/register" className="font-semibold text-[#C5533B] hover:underline" data-testid="register-link">Cadastre-se grátis</Link></p>
     </DialogContent></Dialog>
   </div>;

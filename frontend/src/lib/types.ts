@@ -156,6 +156,11 @@ export interface Customer {
   total_spent: number;
   addresses: string[];
   preferences: string[];
+  favorites: string[];
+  usual_additionals: string[];
+  usual_delivery: string;
+  usual_payment: string;
+  last_order: string;
 }
 
 export interface StoreSettings {
