@@ -139,6 +139,7 @@ def build_system(settings: dict, products: list[dict], zones: list[dict], custom
     ] if line) or "- cliente novo, sem histórico"
     return f"""Você é o atendente virtual do restaurante "{settings['store_name']}" no WhatsApp. Responda em português do Brasil, de forma natural, curta, simpática e direta.
 Endereço da loja: {(settings['store_address'] + ' ' + settings['store_maps_url']).strip() or 'não cadastrado (NÃO invente; diga que a equipe confirma)'}
+Pix da loja: {'configurado (o sistema envia QR/chave quando send_pix=true)' if settings.get('pix_key') else 'NÃO configurado: não prometa enviar Pix; diga que um atendente envia os dados do Pix'}
 Horários: {settings['business_hours'] or 'não cadastrado (NÃO invente)'}
 Pix: {settings['pix_key_type']} {settings['pix_key']} ({settings['pix_beneficiary']})
 CARDÁPIO DISPONÍVEL:
@@ -353,8 +354,19 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
                 data["send_pix"] = True
     pix_key, pix_code, pix_qr = "", "", ""
     open_now = await linked_order({**doc, **extra}, phone)
-    if data.get("send_pix") and not open_now:
-        data["send_pix"] = False  # Pix only after the order is closed
+    said = (input.text or "").lower()
+    asked_pix = bool(re.search(r"\bpix\b|chave|copia e cola|qr ?code", said)) and not re.search(r"paguei|pago|comprovante|transferi", said)
+    wants_pix = bool(data.get("send_pix")) or (asked_pix and intent != "cancel")
+    data["send_pix"] = False
+    if wants_pix and open_now and open_now.get("payment_status") != "pago":
+        if settings["pix_key"]:
+            data["send_pix"] = True
+        else:  # never silent: the customer asked and there is no key to send
+            logger.warning("Pix pedido mas loja sem chave Pix configurada")
+            reply = f"{reply}\n\nUm atendente já te envia os dados do Pix 🙏"
+            extra = {**extra, "status": "needs_human"}
+    elif wants_pix and not open_now and intent != "order_confirmed":
+        reply = f"{reply}\n\nAssim que você confirmar o pedido, eu te mando o Pix 😊"
     if data.get("send_pix") and settings["pix_key"]:
         if settings["pix_mode"] == "brcode" and has_feature("pix_qr"):
             pix = await gerar_pix(open_now["total"], open_now["order_id"], settings)
@@ -362,7 +374,7 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
                 pix_code, pix_qr = pix["copiaECola"], pix["qrCodeBase64"]
         if not pix_code:
             pix_key = settings["pix_key"]
-    if pix_code or pix_key:
+    if (pix_code or pix_key) and "comprovante" not in reply.lower():
         reply = f"{reply}\n\nDepois de pagar, me manda o comprovante aqui (foto ou PDF) 📎"
     menu_images = [{"image": p["image_url"], "caption": f"{p['name']} · R$ {p['price']:.2f}".replace(".", ",")} for p in products if data.get("send_menu") and p.get("active") and p.get("image_url")][:10]
     doc = await push_message(chat_id, "bot", reply, extra)
