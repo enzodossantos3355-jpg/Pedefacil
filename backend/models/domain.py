@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import field_validator, BaseModel, ConfigDict, Field
 
 
 def new_id(prefix: str) -> str:
@@ -285,6 +285,19 @@ class CourierCreate(BaseModel):
     name: str = Field(min_length=2)
     phone: str = ""
     active: bool = True
+
+    @field_validator("phone")
+    @classmethod
+    def br_phone(cls, v: str) -> str:
+        """WhatsApp needs country code: keeps digits and adds 55 (Brasil) when typed as DDD + number."""
+        d = "".join(ch for ch in v if ch.isdigit()).lstrip("0")
+        if not d:
+            return ""
+        if len(d) in (10, 11):
+            d = "55" + d
+        if not (12 <= len(d) <= 13) and cls is CourierCreate:  # stored records never break the list
+            raise ValueError("Número inválido. Use DDD + número, ex: (77) 98888-7777.")
+        return d
 
 
 class Courier(CourierCreate):
