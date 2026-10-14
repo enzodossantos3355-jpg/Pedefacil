@@ -3,18 +3,21 @@ import json
 import zipfile
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 
 from lib.ai import wa_send
 from lib.dates import today_iso
-from lib.db import db
-from lib.geo import quote_fee
+from lib.access import check_limit, has_feature, need
+from lib.db import db, raw_db
+from lib.tenant import TENANT_COLLECTIONS, current_store
+from lib.geo import coords_from_text, geocode_address, quote_fee_full
+from lib.pix import gerar_pix
 from models.domain import (
-    STATUS_FLOW, Courier, CourierCreate, Customer, CustomerCreate, DashboardSummary, DayOpenRequest, DayStatus,
+    LEGACY_STATUS, STATUS_FLOW, Courier, CourierCreate, Customer, CustomerCreate, DashboardSummary, DayOpenRequest, DayStatus,
     DeliveryZone, DeliveryZoneCreate, FeeQuote, FeeQuoteResult, Order, OrderCreate, OrderUpdate, Product,
-    ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
+    PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
 )
 import os
 
@@ -27,14 +30,32 @@ STATUS_MESSAGES = {
     "Novo": "✅ Seu pedido #{id} foi confirmado e já está na fila da cozinha!",
     "Em Preparo": "👩‍🍳 Seu pedido #{id} está sendo preparado.",
     "Pronto": "🍱 Seu pedido #{id} está pronto!",
-    "Saiu para Entrega": "🛵 Seu pedido #{id} saiu para entrega e logo chega até você!",
-    "Entregue": "🙏 Pedido #{id} entregue. Obrigado pela preferência, bom apetite!",
+    "Em Entrega": "🛵 Seu pedido #{id} saiu para entrega e logo chega até você!",
+    "Concluído": "🙏 Pedido #{id} concluído. Obrigado pela preferência, bom apetite!",
     "Cancelado": "Seu pedido #{id} foi cancelado. Se precisar, estamos à disposição.",
 }
 BACKUP_COLLECTIONS = ["products", "orders", "customers", "delivery_zones", "store_settings", "couriers", "chats", "day_closes"]
 
 
+async def require_open_day() -> None:
+    """Orders, PDV, AI and attendance only work while the cash register (caixa) is open."""
+    day = await db.day_status.find_one({}) or {}
+    if day.get("is_open") is False:
+        raise HTTPException(status_code=409, detail="Caixa fechado. Abra o caixa do dia para operar.")
+
+
+OPEN_DAY = [Depends(require_open_day)]
+
+
 async def seed_demo_data() -> None:
+    """Existing single-store data becomes the demo restaurant (active Pro plan), then the demo is seeded."""
+    for name in TENANT_COLLECTIONS:
+        await raw_db[name].update_many({"store_id": {"$exists": False}}, {"$set": {"store_id": "store-demo"}})
+    await raw_db.users.update_many({"store_id": {"$exists": False}, "role": {"$ne": "master"}}, {"$set": {"store_id": "store-demo"}})
+    await raw_db.stores.update_one({"store_id": "store-demo"}, {"$setOnInsert": {"store_id": "store-demo", "name": "Restaurante Demo", "owner_email": "admin@pedefacil.com", "plan": "pro", "status": "active", "trial_ends_at": None, "current_period_end": None, "created_at": datetime.now(timezone.utc)}}, upsert=True)
+    current_store.set("store-demo")
+    for old, new in LEGACY_STATUS.items():
+        await db.orders.update_many({"status": old}, {"$set": {"status": new}})
     if await db.products.count_documents({}) == 0:
         await db.products.insert_many([
             Product(product_id="prod-tradicional", name="Marmita Tradicional", category="Marmita", price=22.9, description="Arroz soltinho, feijão cremoso, proteína do dia, farofa e salada.", image_url=IMG[0], sizes=[{"name": "P", "price": 18.9}, {"name": "M", "price": 22.9}, {"name": "G", "price": 27.9}], additionals=[{"name": "Ovo frito", "price": 3}, {"name": "Bacon", "price": 4}], stock=40).model_dump(),
@@ -60,7 +81,7 @@ async def seed_demo_data() -> None:
     if await db.couriers.count_documents({}) == 0:
         await db.couriers.insert_one(Courier(courier_id="moto-demo01", name="Carlos Entregas", phone="5511955554444").model_dump())
     if await db.store_settings.count_documents({}) == 0:
-        await db.store_settings.insert_one(StoreSettings(pix_key="11999998888", pix_beneficiary="Marmita Hub Ltda").model_dump())
+        await db.store_settings.insert_one(StoreSettings(pix_key="11999998888", pix_beneficiary="Restaurante Demo").model_dump())
     if await db.day_status.count_documents({}) == 0:
         await db.day_status.insert_one(DayStatus(opened_at=datetime.now(timezone.utc)).model_dump())
 
@@ -98,7 +119,7 @@ def metrics(orders: list[Order]) -> dict:
 async def dashboard():
     orders = await all_orders()
     m = metrics(orders)
-    active = [o for o in orders if o.status in STATUS_FLOW[:5]]
+    active = [o for o in orders if o.status in STATUS_FLOW[:5]]  # Em Análise → Em Entrega
     settings = await get_settings()
     return DashboardSummary(today=m["today"], revenue=m["revenue"], month_revenue=m["month_revenue"], total_orders=len(orders), active_orders=len(active), average_ticket=m["avg_ticket"], average_fee=m["avg_fee"], open_orders=len(active), accepting_orders=settings["accepting_orders"], recent_orders=orders[:6])
 
@@ -108,16 +129,26 @@ async def list_orders():
     return await all_orders()
 
 
+async def pix_code_for(total: float, order_id: str) -> str:
+    """Pix BR Code mode: every order total gets its own static Pix Copia e Cola (txid = order id)."""
+    settings = await get_settings()
+    if settings["pix_mode"] != "brcode" or not has_feature("pix_qr"):
+        return ""
+    pix = await gerar_pix(total, order_id, settings)
+    return pix["copiaECola"] if pix else ""
+
+
 async def create_order_record(input: OrderCreate) -> Order:
     subtotal = sum(i.price * i.quantity for i in input.items)
     fee, zone_name = 0.0, ""
-    if input.delivery_type != "Retirada":
+    if input.delivery_type == "Entrega":  # Retirada and Mesa never pay delivery
         if input.delivery_fee is not None:
             fee = input.delivery_fee
         else:
-            q = quote_fee(await db.delivery_zones.find().to_list(500), await get_settings(), input.latitude, input.longitude, input.address)
+            q = await quote_fee_full(await db.delivery_zones.find().to_list(500), await get_settings(), input.latitude, input.longitude, input.address)
             fee, zone_name = q["fee"], q["zone_name"]
-    order = Order(**input.model_dump(exclude={"delivery_fee"}), subtotal=subtotal, delivery_fee=fee, zone_name=zone_name, total=subtotal + fee)
+    order = Order(**input.model_dump(exclude={"delivery_fee"}), subtotal=subtotal, delivery_fee=fee, zone_name=zone_name, total=round(subtotal + fee, 2))
+    order.pix_copia_e_cola = await pix_code_for(order.total, order.order_id)
     await db.orders.insert_one(order.model_dump())
     for item in input.items:  # automatic stock decrement
         await db.products.update_one({"product_id": item.product_id, "stock": {"$ne": None}}, {"$inc": {"stock": -item.quantity}})
@@ -130,12 +161,13 @@ async def create_order_record(input: OrderCreate) -> Order:
     return order
 
 
-@router.post("/orders", response_model=Order)
+@router.post("/orders", response_model=Order, dependencies=OPEN_DAY)
 async def create_order(input: OrderCreate):
+    await check_limit("orders", await db.orders.count_documents({}))
     return await create_order_record(input)
 
 
-@router.put("/orders/{order_id}", response_model=Order)
+@router.put("/orders/{order_id}", response_model=Order, dependencies=OPEN_DAY)
 async def update_order(order_id: str, input: OrderUpdate):
     current = await db.orders.find_one({"order_id": order_id})
     if not current:
@@ -144,7 +176,9 @@ async def update_order(order_id: str, input: OrderUpdate):
     items = data.get("items", current["items"])
     fee = data.get("delivery_fee", current.get("delivery_fee", 0))
     data["subtotal"] = sum(i["price"] * i["quantity"] for i in items)
-    data["total"] = data["subtotal"] + fee
+    data["total"] = round(data["subtotal"] + fee, 2)
+    if data["total"] != current.get("total"):
+        data["pix_copia_e_cola"] = await pix_code_for(data["total"], order_id)
     updated = await db.orders.find_one_and_update({"order_id": order_id}, {"$set": data}, return_document=ReturnDocument.AFTER)
     if "status" in data and data["status"] != current["status"]:
         await notify_status(Order(**updated))
@@ -154,11 +188,16 @@ async def update_order(order_id: str, input: OrderUpdate):
 async def notify_status(order: Order) -> None:
     settings = await get_settings()
     template = STATUS_MESSAGES.get(order.status)
-    if settings["notify_status_changes"] and template and order.customer_phone:
-        await wa_send(order.customer_phone, template.format(id=order.order_id[-6:].upper()))
+    if settings["notify_status_changes"] and template and order.customer_phone and has_feature("whatsapp_ia"):
+        text = template.format(id=order.order_id[-6:].upper())
+        if order.status == "Concluído":
+            platform = await raw_db.platform_settings.find_one({}) or {}
+            footer = platform.get("footer_text") or "Atendimento feito com PedeFácil"
+            text += f"\n\n✨ {footer}" + (f"\n{platform['site_url']}" if platform.get("site_url") else "")
+        await wa_send(order.customer_phone, text)
 
 
-@router.patch("/orders/{order_id}/status", response_model=Order)
+@router.patch("/orders/{order_id}/status", response_model=Order, dependencies=OPEN_DAY)
 async def update_order_status(order_id: str, input: StatusUpdate):
     if input.status not in STATUS_FLOW:
         raise HTTPException(status_code=422, detail="Status inválido.")
@@ -170,12 +209,23 @@ async def update_order_status(order_id: str, input: StatusUpdate):
     return order
 
 
-@router.post("/orders/{order_id}/approve", response_model=Order)
+@router.post("/orders/{order_id}/approve", response_model=Order, dependencies=OPEN_DAY)
 async def approve_order(order_id: str):
     return await update_order_status(order_id, StatusUpdate(status="Novo"))
 
 
-@router.delete("/orders/{order_id}")
+@router.get("/orders/{order_id}/pix", response_model=PixCharge)
+async def order_pix(order_id: str):
+    order = await db.orders.find_one({"order_id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado.")
+    pix = await gerar_pix(order["total"], order_id, await get_settings())
+    if not pix:
+        raise HTTPException(status_code=422, detail="Configure a chave Pix, o favorecido e a cidade em Configurações.")
+    return PixCharge(copia_e_cola=pix["copiaECola"], qr_code_base64=pix["qrCodeBase64"], valor=pix["valor"], txid=pix["txid"])
+
+
+@router.delete("/orders/{order_id}", dependencies=OPEN_DAY)
 async def delete_order(order_id: str):
     if not (await db.orders.delete_one({"order_id": order_id})).deleted_count:
         raise HTTPException(status_code=404, detail="Pedido não encontrado.")
@@ -189,6 +239,7 @@ async def list_products():
 
 @router.post("/products", response_model=Product)
 async def create_product(input: ProductCreate):
+    await check_limit("products", await db.products.count_documents({}))
     product = Product(**input.model_dump())
     await db.products.insert_one(product.model_dump())
     return product
@@ -216,6 +267,7 @@ async def list_customers():
 
 @router.post("/customers", response_model=Customer)
 async def create_customer(input: CustomerCreate):
+    await check_limit("customers", await db.customers.count_documents({}))
     customer = Customer(**input.model_dump(), addresses=[input.address] if input.address else [])
     await db.customers.insert_one(customer.model_dump())
     return customer
@@ -243,6 +295,15 @@ async def get_store():
 
 @router.put("/store/status", response_model=StoreSettings)
 async def update_store(input: StoreSettings):
+    current = await get_settings()
+    if input.store_maps_url and input.store_maps_url != current["store_maps_url"]:
+        coords = await coords_from_text(input.store_maps_url)
+        if coords:
+            input.store_lat, input.store_lng = coords
+    elif input.store_address != current["store_address"] or input.store_lat is None:
+        coords = await geocode_address(input.store_address)
+        if coords:
+            input.store_lat, input.store_lng = coords
     updated = await db.store_settings.find_one_and_update({}, {"$set": input.model_dump()}, upsert=True, return_document=ReturnDocument.AFTER)
     return StoreSettings(**updated)
 
@@ -254,25 +315,19 @@ async def toggle_store():
     return await update_store(current)
 
 
-@router.get("/maps/config")
-async def maps_config():
-    # Browser key for the Maps JavaScript API (restrict it by HTTP referrer in Google Cloud).
-    return {"api_key": os.environ.get("GOOGLE_MAPS_API_KEY", "")}
-
-
 @router.get("/delivery-zones", response_model=list[DeliveryZone])
 async def list_zones():
     return [DeliveryZone(**d) for d in await db.delivery_zones.find().to_list(500)]
 
 
-@router.post("/delivery-zones", response_model=DeliveryZone)
+@router.post("/delivery-zones", response_model=DeliveryZone, dependencies=[need("zonas")])
 async def create_zone(input: DeliveryZoneCreate):
     zone = DeliveryZone(**input.model_dump())
     await db.delivery_zones.insert_one(zone.model_dump())
     return zone
 
 
-@router.put("/delivery-zones/{zone_id}", response_model=DeliveryZone)
+@router.put("/delivery-zones/{zone_id}", response_model=DeliveryZone, dependencies=[need("zonas")])
 async def update_zone(zone_id: str, input: DeliveryZoneCreate):
     updated = await db.delivery_zones.find_one_and_update({"zone_id": zone_id}, {"$set": input.model_dump()}, return_document=ReturnDocument.AFTER)
     if not updated:
@@ -280,7 +335,7 @@ async def update_zone(zone_id: str, input: DeliveryZoneCreate):
     return DeliveryZone(**updated)
 
 
-@router.delete("/delivery-zones/{zone_id}")
+@router.delete("/delivery-zones/{zone_id}", dependencies=[need("zonas")])
 async def delete_zone(zone_id: str):
     await db.delivery_zones.delete_one({"zone_id": zone_id})
     return {"ok": True}
@@ -288,7 +343,7 @@ async def delete_zone(zone_id: str):
 
 @router.post("/delivery-zones/quote", response_model=FeeQuoteResult)
 async def quote_zone(input: FeeQuote):
-    return FeeQuoteResult(**quote_fee(await db.delivery_zones.find().to_list(500), await get_settings(), input.latitude, input.longitude, input.text))
+    return FeeQuoteResult(**await quote_fee_full(await db.delivery_zones.find().to_list(500), await get_settings(), input.latitude, input.longitude, input.text))
 
 
 @router.get("/couriers", response_model=list[Courier])
@@ -302,14 +357,14 @@ async def list_couriers():
     return couriers
 
 
-@router.post("/couriers", response_model=Courier)
+@router.post("/couriers", response_model=Courier, dependencies=[need("motoboys")])
 async def create_courier(input: CourierCreate):
     courier = Courier(**input.model_dump())
     await db.couriers.insert_one(courier.model_dump())
     return courier
 
 
-@router.put("/couriers/{courier_id}", response_model=Courier)
+@router.put("/couriers/{courier_id}", response_model=Courier, dependencies=[need("motoboys")])
 async def update_courier(courier_id: str, input: CourierCreate):
     updated = await db.couriers.find_one_and_update({"courier_id": courier_id}, {"$set": input.model_dump()}, return_document=ReturnDocument.AFTER)
     if not updated:
@@ -317,7 +372,7 @@ async def update_courier(courier_id: str, input: CourierCreate):
     return Courier(**updated)
 
 
-@router.delete("/couriers/{courier_id}")
+@router.delete("/couriers/{courier_id}", dependencies=[need("motoboys")])
 async def delete_courier(courier_id: str):
     await db.couriers.delete_one({"courier_id": courier_id})
     return {"ok": True}
@@ -328,7 +383,7 @@ async def day_status():
     status = await db.day_status.find_one({}) or DayStatus().model_dump()
     orders = await all_orders()
     status["total_orders"] = len(orders)
-    status["open_orders"] = len([o for o in orders if o.status not in {"Entregue", "Cancelado"}])
+    status["open_orders"] = len([o for o in orders if o.status not in {"Concluído", "Cancelado"}])
     status["revenue"] = metrics(orders)["revenue"]
     return DayStatus(**status)
 
@@ -363,10 +418,10 @@ async def report_summary():
         for i in o.items:
             products[i.name] = products.get(i.name, 0) + i.quantity
     top = [{"name": n, "quantity": q} for n, q in sorted(products.items(), key=lambda p: p[1], reverse=True)]
-    return ReportSummary(revenue=m["revenue"], month_revenue=m["month_revenue"], total_orders=len(orders), avg_ticket=m["avg_ticket"], avg_fee=m["avg_fee"], completed_orders=len([o for o in orders if o.status == "Entregue"]), by_payment=by_payment, top_products=top)
+    return ReportSummary(revenue=m["revenue"], month_revenue=m["month_revenue"], total_orders=len(orders), avg_ticket=m["avg_ticket"], avg_fee=m["avg_fee"], completed_orders=len([o for o in orders if o.status == "Concluído"]), by_payment=by_payment, top_products=top)
 
 
-@router.get("/backup/export")
+@router.get("/backup/export", dependencies=[need("backup")])
 async def export_backup():
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -378,7 +433,7 @@ async def export_backup():
     return StreamingResponse(buffer, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-@router.post("/backup/import")
+@router.post("/backup/import", dependencies=[need("backup")])
 async def import_backup(file: UploadFile = File(...)):
     raw = await file.read()
     try:

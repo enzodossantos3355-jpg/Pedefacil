@@ -15,7 +15,12 @@ load_dotenv(ROOT_DIR / '.env')
 from lib.db import client, db, ensure_indexes
 from routers.auth import router as auth_router
 from routers.operations import router as operations_router, seed_demo_data
-from routers.whatsapp import router as whatsapp_router
+from routers.whatsapp import internal_router as whatsapp_internal_router, open_router as whatsapp_open_router, router as whatsapp_router
+from routers.billing import router as billing_router
+from routers.tables import router as tables_router
+from routers.support import router as support_router
+from fastapi import Depends
+from lib.access import active_store, need
 
 
 # Startup runs before the yield, shutdown after it. Add your own setup/teardown here.
@@ -33,8 +38,14 @@ app = FastAPI(lifespan=lifespan)
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 api_router.include_router(auth_router)
-api_router.include_router(operations_router)
-api_router.include_router(whatsapp_router)
+api_router.include_router(support_router)  # store user / master per route
+api_router.include_router(billing_router)  # own per-route auth (store user / master / Stripe webhook)
+api_router.include_router(whatsapp_internal_router)  # bridge → backend, internal token
+STORE = [Depends(active_store)]  # session → store (tenant) → plan in force
+api_router.include_router(operations_router, dependencies=STORE)
+api_router.include_router(whatsapp_open_router, dependencies=STORE)
+api_router.include_router(whatsapp_router, dependencies=[*STORE, need("whatsapp_ia")])
+api_router.include_router(tables_router, dependencies=[*STORE, need("mesas")])
 
 # Add your routes to the router instead of directly to app
 @api_router.get("/")

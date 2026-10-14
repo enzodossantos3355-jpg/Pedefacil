@@ -1,0 +1,108 @@
+{
+  "iteration": 1,
+  "summary": "All 8 acceptance criteria exercised: 4 backend test files (8 tests) + 9 browser checks (incl. 1 run against the public preview URL). All passed.",
+  "passed": 17,
+  "failed": 0,
+  "bugs": [],
+  "action_items": [],
+  "retest_needed": false,
+  "checks": [
+    {
+      "criterion": "Signup creates an isolated restaurant on a 7-day restricted trial",
+      "name": "test_tscheck_signup_trial.py",
+      "lane": "backend",
+      "status": "passed",
+      "evidence": "POST /api/auth/register -> 200, store_id != store-demo; GET /api/billing/me -> plan=trial, trial_days_left=7, limits.orders=20, limits.products=8; GET /api/orders and /api/products both return [] for the new store; duplicate email re-register -> rejected"
+    },
+    {
+      "criterion": "Signup creates an isolated restaurant on a 7-day restricted trial",
+      "name": "signup-creates-trial-store",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "/register -> /dashboard shows 'Teste grátis: 7 dia(s)' banner for a freshly created store"
+    },
+    {
+      "criterion": "Signup creates an isolated restaurant on a 7-day restricted trial (public preview URL)",
+      "name": "preview-url-signup-trial-smoke",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "Same signup flow run against https://brazil-feijoada.preview.emergentagent.com; trial banner visible on /dashboard"
+    },
+    {
+      "criterion": "Locked features show lock + upgrade",
+      "name": "test_tscheck_locked_features.py",
+      "lane": "backend",
+      "status": "passed",
+      "evidence": "GET /api/whatsapp/chats on a trial store -> 403 {code: plan_required, required_plan: padrao}; unauthenticated request -> 401/403"
+    },
+    {
+      "criterion": "Locked features show lock + upgrade",
+      "name": "locked-feature-shows-upgrade",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "New trial store: nav shows locked 'Atendimento WhatsApp'; /atendimento shows 'Disponível no plano Padrão' + 'Fazer upgrade' button which redirects to /planos"
+    },
+    {
+      "criterion": "Plans page + Stripe checkout",
+      "name": "test_tscheck_plans_checkout.py",
+      "lane": "backend",
+      "status": "passed",
+      "evidence": "POST /api/billing/checkout {plan: padrao} -> 200 {checkout_url: https://checkout.stripe.com/...}; unauthenticated checkout -> 401/403"
+    },
+    {
+      "criterion": "Plans page + Stripe checkout",
+      "name": "plans-page-checkout-redirect",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "/planos shows Básico R$49 / Padrão R$99 / Pro R$199; 'Assinar Padrão' redirects to checkout.stripe.com; /payment/cancel shows 'Pagamento cancelado'"
+    },
+    {
+      "criterion": "Master panel",
+      "name": "test_tscheck_master_panel.py",
+      "lane": "backend",
+      "status": "passed",
+      "evidence": "GET /api/master/stores lists the freshly registered store; PUT /api/master/stores/{id} {plan: pro, status: active} -> 200; that store's GET /api/billing/me now returns plan=pro; non-master GET /api/master/stores -> 403"
+    },
+    {
+      "criterion": "Master panel",
+      "name": "master-panel-manages-stores",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "master@pedefacil.com -> /master lists a freshly created store; changing its plan select to Pro shows 'Em vigor: Pro / Status: active'; Plataforma tab footer text + site URL saved and persisted after reload"
+    },
+    {
+      "criterion": "Central de Suporte",
+      "name": "support-ticket-roundtrip",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "Store admin opens a ticket at /suporte; master sees and replies to it in Suporte tab; store user sees the reply text and status 'respondido'"
+    },
+    {
+      "criterion": "Caixa gating",
+      "name": "caixa-gating-blocks-orders",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "POST /api/day/close then /pedidos and /atendimento both show 'Caixa fechado' with 'Abrir Caixa' button; POST /api/orders -> 409; POST /api/day/open restores access; demo store caixa confirmed OPEN at the end (GET /api/day/status is_open=true)"
+    },
+    {
+      "criterion": "Pedidos page (demo Pro store)",
+      "name": "pedidos-page-full-flow",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "Kitchen summary panel, type tabs (Todos/Entrega/Retirada), payment chips, status tabs incl. Em Análise/Cancelado all visible; created a new order via 'Novo Pedido'; opened its 'Mais' menu and 'Pix (QR Code)' dialog showing QR image + 'Copia e Cola'"
+    },
+    {
+      "criterion": "Mesas (demo store, tables_enabled=true)",
+      "name": "mesas-order-total-excludes-delivery-fee",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "Added a tscheck table, launched Suco Natural 500ml x1, total showed R$ 8,50 (delivery fee excluded), sent to kitchen, closed the bill (table returned to 'Livre'), then deleted the test table (table list confirmed empty of the test row afterward)"
+    }
+  ],
+  "notes": [
+    "Did not touch the demo store's real WhatsApp connection per seed_facts (no Desconectar/Forçar Reconexão, no manual /atendimento messages, no simulate-message calls).",
+    "Caixa for store-demo was closed and reopened during the gating check; final state verified OPEN.",
+    "Cleaned up residual tscheck test tables from earlier iteration attempts via DELETE /api/tables to keep the demo store's Mesas view tidy.",
+    "Matrix has exactly 8 criteria; covered all 8 with a mix of backend (4 files/8 tests) and browser (9 checks, including the mandated public-preview-URL run)."
+  ]
+}

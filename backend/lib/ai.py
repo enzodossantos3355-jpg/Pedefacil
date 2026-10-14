@@ -47,17 +47,19 @@ WA_HEADERS = {"x-internal-token": os.environ.get("WHATSAPP_INTERNAL_TOKEN", "")}
 
 
 async def wa_call(method: str, path: str, body: dict | None = None) -> dict:
+    """Each store has its own WhatsApp session in the bridge, selected by the x-store-id header."""
+    from lib.tenant import current_store
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            res = await client.request(method, f"{WA_URL}{path}", json=body, headers=WA_HEADERS)
+            res = await client.request(method, f"{WA_URL}{path}", json=body, headers={**WA_HEADERS, "x-store-id": current_store.get()})
             return res.json() if res.content else {}
     except Exception as exc:  # bridge offline must never break the panel
         logger.warning("whatsapp bridge %s %s: %s", method, path, exc)
         return {"status": "offline", "is_connected": False, "detail": "Serviço do WhatsApp indisponível"}
 
 
-async def wa_send(to: str, text: str, pix_key: str = "") -> bool:
+async def wa_send(to: str, text: str, pix_key: str = "", pix_code: str = "", pix_qr: str = "") -> bool:
     if not to:
         return False
-    res = await wa_call("POST", "/send", {"to": to, "text": text, "pix_key": pix_key or None})
+    res = await wa_call("POST", "/send", {"to": to, "text": text, "pix_key": pix_key or None, "pix_code": pix_code or None, "pix_qr": pix_qr or None})
     return bool(res.get("ok"))

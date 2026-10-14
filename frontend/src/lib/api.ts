@@ -9,11 +9,19 @@ export class ApiError extends Error {
   body: unknown;
 
   constructor(status: number, body: unknown) {
-    super(`request failed with ${status}`);
+    super(detailMessage(body) ?? `request failed with ${status}`);
     this.name = "ApiError";
     this.status = status;
     this.body = body;
   }
+}
+
+// FastAPI errors: {detail: "text"} or {detail: {message, code, required_plan}} (plan locks).
+function detailMessage(body: unknown): string | undefined {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && "message" in detail) return String((detail as { message: unknown }).message);
+  return undefined;
 }
 
 type JsonBody = unknown;

@@ -13,14 +13,28 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-STATUS_FLOW = ["Em Análise", "Novo", "Em Preparo", "Pronto", "Saiu para Entrega", "Entregue", "Cancelado"]
+STATUS_FLOW = ["Em Análise", "Novo", "Em Preparo", "Pronto", "Em Entrega", "Concluído", "Cancelado"]
+LEGACY_STATUS = {"Saiu para Entrega": "Em Entrega", "Entregue": "Concluído"}
 
 
 class UserCreate(BaseModel):
     name: str = Field(min_length=2)
     email: str
     password: str = Field(min_length=6)
-    role: Literal["admin", "atendente"] = "admin"
+    store_name: str = ""
+
+
+class TeamMemberCreate(BaseModel):
+    name: str = Field(min_length=2)
+    email: str
+    password: str = Field(min_length=6)
+
+
+class TeamMember(BaseModel):
+    id: str
+    name: str
+    email: str
+    role: str
 
 
 class LoginRequest(BaseModel):
@@ -32,7 +46,59 @@ class User(BaseModel):
     id: str
     name: str
     email: str
-    role: Literal["admin", "atendente"]
+    role: Literal["admin", "atendente", "master"]
+    store_id: str = ""
+    store_name: str = ""
+
+
+class PlanInfo(BaseModel):
+    plan: str
+    plan_name: str
+    status: str
+    features: list[str]
+    limits: dict[str, int]
+    expired: bool
+    trial_days_left: int | None = None
+    trial_ends_at: datetime | None = None
+    current_period_end: datetime | None = None
+    tables_enabled: bool = False
+
+
+class PlanOption(BaseModel):
+    key: str
+    name: str
+    price: float
+    features: list[str]
+    limits: dict[str, int]
+
+
+class CheckoutRequest(BaseModel):
+    plan: Literal["basico", "padrao", "pro"]
+    origin_url: str
+
+
+class StoreAdmin(BaseModel):
+    store_id: str
+    name: str
+    owner_email: str
+    plan: str
+    status: str
+    effective_plan: str
+    trial_ends_at: datetime | None = None
+    current_period_end: datetime | None = None
+    created_at: datetime | None = None
+    orders_count: int = 0
+
+
+class StoreAdminUpdate(BaseModel):
+    plan: Literal["basico", "padrao", "pro"] | None = None
+    status: Literal["trialing", "active", "canceled"] | None = None
+    extend_days: int | None = None
+
+
+class PlatformSettings(BaseModel):
+    site_url: str = ""
+    footer_text: str = "Atendimento feito com PedeFácil"
 
 
 class Additional(BaseModel):
@@ -67,6 +133,7 @@ class OrderCreate(BaseModel):
     longitude: float | None = None
     status: str = "Novo"
     source: str = "balcao"
+    table_number: int | None = None
 
 
 class OrderUpdate(BaseModel):
@@ -97,9 +164,11 @@ class Order(BaseModel):
     status: str = "Novo"
     zone_name: str = ""
     courier_id: str = ""
+    pix_copia_e_cola: str = ""
     latitude: float | None = None
     longitude: float | None = None
     source: str = "balcao"
+    table_number: int | None = None
     created_at: datetime = Field(default_factory=now_utc)
 
 
@@ -136,7 +205,7 @@ class Customer(CustomerCreate):
 
 class StoreSettings(BaseModel):
     accepting_orders: bool = True
-    store_name: str = "Marmita Hub"
+    store_name: str = "Restaurante Demo"
     store_address: str = "Rua do Sabor, 150 - Centro, São Paulo - SP"
     store_maps_url: str = ""
     store_lat: float | None = -23.5505
@@ -146,6 +215,9 @@ class StoreSettings(BaseModel):
     pix_key_type: str = "Celular"
     pix_key: str = ""
     pix_beneficiary: str = ""
+    pix_mode: str = "chave"  # "chave" = sends the key | "brcode" = static BR Code locked to the order total
+    pix_city: str = "SAO PAULO"
+    tables_enabled: bool = False  # optional dine-in tables module (Padrão/Pro)
     high_demand_message: str = "Estamos com alta demanda agora. Em instantes voltamos a aceitar pedidos!"
     ai_custom_instructions: str = ""
     notify_status_changes: bool = True
@@ -160,10 +232,11 @@ class LatLng(BaseModel):
 class DeliveryZoneCreate(BaseModel):
     name: str = Field(min_length=2)
     fee: float = Field(ge=0)
-    kind: Literal["polygon", "radius", "keyword"] = "keyword"
+    kind: Literal["polygon", "radius", "keyword", "cep"] = "keyword"
     polygon: list[LatLng] = []
     radius_km: float = 0
     keywords: list[str] = []
+    ceps: list[str] = []  # exact CEP, prefix ("01310") or range ("01000-000 a 01099-999")
 
 
 class DeliveryZone(DeliveryZoneCreate):
@@ -242,10 +315,13 @@ class StatusUpdate(BaseModel):
 
 
 class IncomingMessage(BaseModel):
+    store_id: str = ""
     jid: str = ""
     phone: str
     name: str = ""
-    text: str
+    text: str = ""
+    audio_base64: str = ""
+    audio_mime: str = ""
     latitude: float | None = None
     longitude: float | None = None
 
@@ -294,3 +370,71 @@ class ReportSummary(BaseModel):
     completed_orders: int
     by_payment: dict[str, float]
     top_products: list[dict[str, Any]]
+
+
+class PixCharge(BaseModel):
+    copia_e_cola: str
+    qr_code_base64: str
+    valor: str
+    txid: str
+
+
+class TableCreate(BaseModel):
+    number: int = Field(ge=1)
+    seats: int = Field(default=4, ge=1)
+
+
+class DiningTable(TableCreate):
+    table_id: str = Field(default_factory=lambda: new_id("mesa"))
+    status: Literal["livre", "ocupada"] = "livre"
+    opened_at: datetime | None = None
+
+
+class TableOrderCreate(BaseModel):
+    items: list[OrderItem]
+    notes: str = ""
+    customer_name: str = ""
+
+
+class TableView(DiningTable):
+    orders: list[Order] = []
+    total: float = 0
+
+
+class TableClose(BaseModel):
+    payment_method: str = "Dinheiro"
+
+
+class SupportMessage(BaseModel):
+    id: str
+    sender: Literal["loja", "suporte"]
+    author: str
+    text: str
+    timestamp: datetime
+
+
+class SupportTicket(BaseModel):
+    ticket_id: str
+    store_id: str
+    store_name: str = ""
+    user_email: str = ""
+    subject: str
+    category: str = "Dúvida"
+    status: Literal["aberto", "respondido", "resolvido"] = "aberto"
+    created_at: datetime
+    updated_at: datetime
+    messages: list[SupportMessage] = []
+
+
+class SupportTicketCreate(BaseModel):
+    subject: str = Field(min_length=3)
+    category: str = "Dúvida"
+    message: str = Field(min_length=3)
+
+
+class SupportMessageCreate(BaseModel):
+    text: str = Field(min_length=1)
+
+
+class SupportStatusUpdate(BaseModel):
+    status: Literal["aberto", "respondido", "resolvido"]
