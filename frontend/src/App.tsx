@@ -1,4 +1,5 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import AuthCallback from "@/components/AuthCallback";
 import { Toaster } from "@/components/ui/sonner";
 import AppShell from "@/components/AppShell";
 import Login from "@/pages/Login";
@@ -16,11 +17,14 @@ import Planos, { PaymentResult } from "@/pages/Planos";
 import Suporte from "@/pages/Suporte";
 import Master from "@/pages/Master";
 import Mesas from "@/pages/Mesas";
+import Entregadores from "@/pages/Entregadores";
 import Equipe from "@/pages/Equipe";
 import FeatureGate from "@/components/FeatureGate";
 
 // One <Route> per page in src/pages; BrowserRouter already wraps this in main.tsx.
 export default function App() {
+  const location = useLocation(); // reactive hash: Google OAuth returns with #session_id=...
+  if (location.hash.includes("session_id=")) return <><AuthCallback /><Toaster richColors /></>;
   return (
     <>
       <Routes>
@@ -34,6 +38,7 @@ export default function App() {
           <Route path="/produtos" element={<Produtos />} />
           <Route path="/clientes" element={<Clientes />} />
           <Route path="/atendimento" element={<FeatureGate feature="whatsapp_ia"><DayGate><Atendimento /></DayGate></FeatureGate>} />
+          <Route path="/entregadores" element={<FeatureGate feature="motoboys"><Entregadores /></FeatureGate>} />
           <Route path="/mesas" element={<FeatureGate feature="mesas"><DayGate><Mesas /></DayGate></FeatureGate>} />
           <Route path="/equipe" element={<Equipe />} />
           <Route path="/planos" element={<Planos />} />

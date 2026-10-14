@@ -1,4 +1,5 @@
 import hashlib
+import httpx
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -8,9 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from lib.access import SESSION_COOKIE, check_limit, enter_store, session_user, store_user
 from lib.db import db, raw_db
 from lib.plans import TRIAL_DAYS
-from models.domain import DayStatus, LoginRequest, StoreSettings, TeamMember, TeamMemberCreate, User, UserCreate, new_id
+from models.domain import GoogleSession, DayStatus, LoginRequest, StoreSettings, TeamMember, TeamMemberCreate, User, UserCreate, new_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+EMERGENT_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
 def password_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -41,32 +43,59 @@ async def start_session(response: Response, user: dict) -> None:
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 14)
 
 
-@router.post("/register", response_model=User)
-async def register(input: UserCreate, response: Response):
-    """Each signup creates its own restaurant with a 7-day restricted free trial."""
-    email = input.email.lower().strip()
-    if await raw_db.users.find_one({"email": email}):
-        raise HTTPException(status_code=409, detail="Este e-mail já está cadastrado.")
+async def create_store_account(name: str, email: str, store_name: str, pwd_hash: str | None, picture: str = "") -> dict:
+    """Each new account gets its own restaurant with a 7-day restricted free trial."""
     now = datetime.now(timezone.utc)
     store_id = new_id("store")
-    store_name = input.store_name.strip() or f"Restaurante de {input.name.split()[0]}"
+    store_name = store_name.strip() or f"Restaurante de {name.split()[0] if name.strip() else 'Novo'}"
     await raw_db.stores.insert_one({"store_id": store_id, "name": store_name, "owner_email": email, "plan": "basico", "status": "trialing",
                                     "trial_ends_at": now + timedelta(days=TRIAL_DAYS), "current_period_end": None, "created_at": now})
-    doc = {"id": new_id("user"), "name": input.name, "email": email, "role": "admin", "store_id": store_id,
-           "password_hash": password_hash(input.password), "created_at": now}
+    doc = {"id": new_id("user"), "name": name or email.split("@")[0], "email": email, "role": "admin", "store_id": store_id,
+           "password_hash": pwd_hash, "picture": picture, "created_at": now}
     await raw_db.users.insert_one(doc)
     await enter_store(store_id)
     await db.store_settings.insert_one(StoreSettings(store_name=store_name, pix_beneficiary=store_name).model_dump())
     await db.day_status.insert_one(DayStatus(opened_at=now).model_dump())
+    return doc
+
+
+@router.post("/register", response_model=User)
+async def register(input: UserCreate, response: Response):
+    email = input.email.lower().strip()
+    if await raw_db.users.find_one({"email": email}):
+        raise HTTPException(status_code=409, detail="Este e-mail já está cadastrado.")
+    doc = await create_store_account(input.name, email, input.store_name, password_hash(input.password))
     await start_session(response, doc)
     return await public_user(doc)
+
+
+@router.post("/google", response_model=User)
+async def google_login(input: GoogleSession, response: Response):
+    """Emergent-managed Google OAuth: session_id → verified Google profile (server-side) → our own session cookie.
+    Existing email logs into its account (any role); a new email signs up with its own store on the trial."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(EMERGENT_SESSION_URL, headers={"X-Session-ID": input.session_id})
+    if res.status_code != 200:
+        raise HTTPException(status_code=401, detail="Não foi possível confirmar o login com o Google. Tente novamente.")
+    profile = res.json()
+    email = (profile.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(status_code=401, detail="Conta Google sem e-mail.")
+    user = await raw_db.users.find_one({"email": email})
+    if user:
+        if profile.get("picture"):
+            await raw_db.users.update_one({"id": user["id"]}, {"$set": {"picture": profile["picture"]}})
+    else:
+        user = await create_store_account(profile.get("name") or "", email, "", None, profile.get("picture") or "")
+    await start_session(response, user)
+    return await public_user(user)
 
 
 @router.post("/login", response_model=User)
 async def login(input: LoginRequest, response: Response):
     email = input.email.lower().strip()
     user = await raw_db.users.find_one({"email": email})
-    if not user or user.get("password_hash") != password_hash(input.password):
+    if not user or not user.get("password_hash") or user["password_hash"] != password_hash(input.password):
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
     await start_session(response, user)
     return await public_user(user)

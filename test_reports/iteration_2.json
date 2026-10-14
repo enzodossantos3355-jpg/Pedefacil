@@ -1,0 +1,68 @@
+{
+  "iteration": 2,
+  "summary": "New criteria from this round's diff (structured product form, Google OAuth, courier WhatsApp sheet with GPS, 'Estou na loja' store coords, order GPS link) covered with 7 new backend tests (3 files) + 4 new browser checks, all passing. Also found and fixed 7 PRE-EXISTING browser checks broken by this round's changes (stale master email/demo credentials removed per SPEC, and new 'Entrar com Google'/'Cadastrar com Google' buttons colliding with old loose text selectors) plus 1 pre-existing backend test using the old master password. All 15 backend tests and all 13 browser checks now pass.",
+  "passed": 22,
+  "failed": 0,
+  "bugs": [],
+  "action_items": [],
+  "retest_needed": false,
+  "checks": [
+    {
+      "criterion": "Product form is structured: optional sizes, additionals with aliases, product aliases, and photo upload",
+      "name": "test_tscheck_product_structured_form.py",
+      "lane": "backend",
+      "status": "passed",
+      "evidence": "POST /api/products with sizes/additionals(aliases)/aliases/data-URL image -> 200, all fields echoed back exactly; GET /api/products confirms persistence; a second product with sizes=[] confirms sizes stay optional"
+    },
+    {
+      "criterion": "Product form is structured: optional sizes, additionals with aliases, product aliases, and photo upload",
+      "name": "product-form-structured-fields",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "New store -> /produtos -> add-product dialog: tag-input aliases (marmitex, quentinha), 'tem tamanhos' checkbox reveals size rows (P/18.90), additionals row with its own alias tag (ovinho), 1x1 PNG uploaded via file input shows preview; saved card shows 'Também chamam de: marmitex, quentinha' and 'Ovo frito'"
+    },
+    {
+      "criterion": "Google OAuth login/signup (Emergent-managed) wiring",
+      "name": "test_tscheck_google_oauth.py",
+      "lane": "backend",
+      "status": "passed",
+      "evidence": "POST /api/auth/google {session_id: invalid} -> 401, no marmita_session cookie set; missing session_id -> 422"
+    },
+    {
+      "criterion": "Google OAuth login/signup (Emergent-managed) wiring",
+      "name": "google-login-button-redirects",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "/login dialog shows 'Entrar com Google'; clicking it navigates the browser to auth.emergentagent.com (the Emergent-managed OAuth entry point). Completing the real Google flow needs a live Google account, outside this tool's reach -- covered by the backend negative test instead"
+    },
+    {
+      "criterion": "Courier gets the delivery sheet via WhatsApp with a GPS route link (send-courier)",
+      "name": "test_tscheck_send_courier.py",
+      "lane": "backend",
+      "status": "passed",
+      "evidence": "POST /orders/{unknown}/send-courier -> 404; order with no courier assigned -> 422; order with a courier (phone set) on a store whose WhatsApp is not connected -> 409 (fails cleanly instead of crashing or silently succeeding)"
+    },
+    {
+      "criterion": "Order card shows the customer's GPS location link when available (courier feature)",
+      "name": "order-shows-customer-gps-link",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "POST /api/orders with latitude/longitude, delivery_type Entrega -> /pedidos card shows a 'Localização GPS do cliente' link with href pointing to maps/dir?...-22.9068...-43.1729"
+    },
+    {
+      "criterion": "'Estou na loja' button sets the store's map coordinates from the browser's geolocation",
+      "name": "settings-use-my-location-sets-store-coords",
+      "lane": "browser",
+      "status": "passed",
+      "evidence": "Store upgraded to Padrão (zonas feature) via master API; geolocation mocked to -22.9068,-43.1729; clicking 'Estou na loja: usar minha localização' fires PUT /api/store/status with store_lat/store_lng matching the mocked coords; GET /api/store/status cross-check confirms persistence"
+    }
+  ],
+  "notes": [
+    "Fixed test_tscheck_master_panel.py::test_master_lists_stores_and_changes_plan: it logged in as the old master@pedefacil.com/master123, which no longer exists per SPEC/test_credentials.md (master is now enzodossantos3355@gmail.com). Updated the credentials in that file; it now passes. Classified as flaky-fixture (stale credential), not an app bug.",
+    "Fixed 6 pre-existing browser checks that used loose text regex (/entrar|login/i, /criar conta|cadastrar/i) for the submit button: the new 'Entrar com Google' / 'Cadastrar com Google' buttons on the same forms also match those regexes and were being clicked instead, sending the page to a real (unreachable from this sandbox) Google OAuth flow. Rewrote caixa-gating-blocks-orders, mesas-order-total-excludes-delivery-fee, support-ticket-roundtrip, master-panel-manages-stores, signup-creates-trial-store, plans-page-checkout-redirect and preview-url-signup-trial-smoke to use data-testid selectors / direct API calls for auth, and (where credentials were stale) the current master login and a freshly registered store. All now pass. This was a test-selector fragility issue caused by the new Google buttons' text overlapping old generic regexes -- not a product bug (a real user reads 'Entrar com Google' vs 'Entrar' and would not confuse them).",
+    "pedidos-page-full-flow and mesas-order-total-excludes-delivery-fee also needed the Pix/Mesas plan features (Padrão+) and, for Pix, a configured pix_key -- the old demo store had these pre-configured; fresh tscheck stores now set them explicitly via the master/store APIs before exercising the UI.",
+    "Did not attempt to complete a real Google sign-in (no live Google account available to this tool); the signup/login-side verification is covered by the backend's invalid-session negative test per auth_testing.md's own suggested check.",
+    "'Atendentes see the whole panel' is existing, unchanged behavior (by design per SPEC) with no new UI surface in this round's diff; not re-verified as a standalone criterion.",
+    "All store/order fixtures used tscheck- prefixes and throwaway emails; the real store 'Feijoada Da Ana' was never touched."
+  ]
+}

@@ -87,6 +87,7 @@ export interface DiningTable {
 export interface Additional {
   name: string;
   price: number;
+  aliases: string[];
 }
 
 export interface ProductSize {
@@ -123,6 +124,11 @@ export interface Order {
   longitude: number | null;
   source: string;
   table_number: number | null;
+  surcharge: number;
+  discount: number;
+  payment_intent: string;
+  payment_status: "pendente" | "em_verificacao" | "pago";
+  receipt_note: string;
   created_at: string;
 }
 
@@ -141,6 +147,7 @@ export interface Product {
   description: string;
   active: boolean;
   image_url: string;
+  aliases: string[];
   sizes: ProductSize[];
   additionals: Additional[];
   stock: number | null;
@@ -155,6 +162,8 @@ export interface Customer {
   orders_count: number;
   total_spent: number;
   addresses: string[];
+  last_lat: number | null;
+  last_lng: number | null;
   preferences: string[];
   favorites: string[];
   usual_additionals: string[];
@@ -207,6 +216,8 @@ export interface Courier {
   active: boolean;
   deliveries_today: number;
   fees_today: number;
+  working_date: string;
+  working_today: boolean;
 }
 
 export interface WhatsAppStatus {
@@ -261,6 +272,7 @@ export interface ChatMessage {
 }
 
 export interface Chat {
+  order_id: string;
   chat_id: string;
   customer_name: string;
   phone: string;
@@ -289,4 +301,12 @@ export function statusClass(status: string): string {
     Cancelado: "bg-red-50 text-red-800 border-red-200",
   };
   return styles[status] ?? "bg-stone-100 text-stone-700 border-stone-200";
+}
+export interface AppNotification {
+  id: string;
+  kind: "new_order" | "needs_human" | "receipt";
+  title: string;
+  detail: string;
+  link: string;
+  created_at: string;
 }

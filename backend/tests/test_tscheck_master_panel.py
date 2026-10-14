@@ -22,7 +22,7 @@ def _register_store(client, slug):
 def _master_login(client):
     resp = client.post(
         "/auth/login",
-        json={"email": "master@pedefacil.com", "password": "master123"},
+        json={"email": "enzodossantos3355@gmail.com", "password": "enzo123cg"},
     )
     assert resp.status_code == 200, resp.text
     return resp.cookies

@@ -32,3 +32,4 @@ typer>=0.9.0
 emergentintegrations==0.2.2
 imageio-ffmpeg==0.6.0
 stripe==14.4.1
+nodejs-wheel-binaries==22.20.0

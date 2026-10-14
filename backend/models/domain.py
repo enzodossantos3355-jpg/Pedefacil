@@ -24,6 +24,10 @@ class UserCreate(BaseModel):
     store_name: str = ""
 
 
+class GoogleSession(BaseModel):
+    session_id: str = Field(min_length=4)
+
+
 class TeamMemberCreate(BaseModel):
     name: str = Field(min_length=2)
     email: str
@@ -104,6 +108,7 @@ class PlatformSettings(BaseModel):
 class Additional(BaseModel):
     name: str
     price: float = 0
+    aliases: list[str] = []  # how customers usually call it ("ovinho", "ovo frito")
 
 
 class ProductSize(BaseModel):
@@ -121,6 +126,9 @@ class OrderItem(BaseModel):
 
 
 class OrderCreate(BaseModel):
+    surcharge: float = 0  # acréscimo
+    discount: float = 0  # desconto
+    payment_intent: str = ""  # how the customer SAYS they will pay; never means paid
     customer_name: str = Field(min_length=2)
     customer_phone: str = ""
     delivery_type: str = "Entrega"
@@ -137,6 +145,10 @@ class OrderCreate(BaseModel):
 
 
 class OrderUpdate(BaseModel):
+    surcharge: float | None = None
+    discount: float | None = None
+    payment_intent: str | None = None
+    payment_status: Literal["pendente", "em_verificacao", "pago"] | None = None
     customer_name: str | None = None
     customer_phone: str | None = None
     delivery_type: str | None = None
@@ -150,6 +162,11 @@ class OrderUpdate(BaseModel):
 
 
 class Order(BaseModel):
+    surcharge: float = 0
+    discount: float = 0
+    payment_intent: str = ""
+    payment_status: Literal["pendente", "em_verificacao", "pago"] = "pendente"
+    receipt_note: str = ""  # what the AI read on the Pix receipt
     order_id: str = Field(default_factory=lambda: new_id("ord"))
     customer_name: str
     customer_phone: str = ""
@@ -178,7 +195,8 @@ class ProductCreate(BaseModel):
     price: float = Field(ge=0)
     description: str = ""
     active: bool = True
-    image_url: str = ""
+    image_url: str = ""  # https URL or an uploaded photo (data URL, resized in the browser)
+    aliases: list[str] = []  # names customers usually say ("marmitex", "quentinha")
     sizes: list[ProductSize] = []
     additionals: list[Additional] = []
     stock: int | None = None  # None = sem controle de estoque
@@ -200,6 +218,8 @@ class Customer(CustomerCreate):
     orders_count: int = 0
     total_spent: float = 0
     addresses: list[str] = []
+    last_lat: float | None = None  # last GPS location the customer sent on WhatsApp
+    last_lng: float | None = None
     preferences: list[str] = []  # restrictions/likes detected by the AI in conversations
     favorites: list[str] = []  # learned from order history (computed, not stored)
     usual_additionals: list[str] = []
@@ -270,7 +290,9 @@ class CourierCreate(BaseModel):
 class Courier(CourierCreate):
     courier_id: str = Field(default_factory=lambda: new_id("moto"))
     deliveries_today: int = 0
-    fees_today: float = 0
+    fees_today: float = 0  # balance: sum of the zone fee of each delivery made today
+    working_date: str = ""  # YYYY-MM-DD the owner marked this courier as working
+    working_today: bool = False
 
 
 class DayOpenRequest(BaseModel):
@@ -295,6 +317,7 @@ class ChatMessage(BaseModel):
 
 
 class Chat(BaseModel):
+    order_id: str = ""  # the order this conversation is editing (changes update it, never duplicate)
     chat_id: str
     customer_name: str
     phone: str
@@ -327,6 +350,8 @@ class IncomingMessage(BaseModel):
     text: str = ""
     audio_base64: str = ""
     audio_mime: str = ""
+    media_base64: str = ""  # image or PDF (e.g. Pix receipt)
+    media_mime: str = ""
     latitude: float | None = None
     longitude: float | None = None
 
@@ -443,3 +468,12 @@ class SupportMessageCreate(BaseModel):
 
 class SupportStatusUpdate(BaseModel):
     status: Literal["aberto", "respondido", "resolvido"]
+
+
+class AppNotification(BaseModel):
+    id: str
+    kind: Literal["new_order", "needs_human", "receipt"]
+    title: str
+    detail: str
+    link: str
+    created_at: datetime

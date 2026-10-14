@@ -79,13 +79,19 @@ async function start(storeId, { pairingPhone } = {}) {
           try { audioBase64 = (await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock.updateMediaMessage })).toString("base64"); }
           catch (err) { logger.warn({ err }, "falha ao baixar áudio"); }
         }
-        const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || (loc ? "[localização enviada]" : "");
-        if (!text && !audioBase64) continue;
+        const media = m.imageMessage || (m.documentMessage?.mimetype?.includes("pdf") ? m.documentMessage : null) || m.documentWithCaptionMessage?.message?.documentMessage;
+        let mediaBase64 = "";
+        if (media) {
+          try { mediaBase64 = (await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock.updateMediaMessage })).toString("base64"); }
+          catch (err) { logger.warn({ err }, "falha ao baixar arquivo"); }
+        }
+        const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || media?.caption || (loc ? "[localização enviada]" : "");
+        if (!text && !audioBase64 && !mediaBase64) continue;
         try {
           await fetch(`${BACKEND_URL}/api/whatsapp/incoming`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-internal-token": TOKEN },
-            body: JSON.stringify({ store_id: storeId, jid: remote, phone: jidToPhone(phoneJid), name: msg.pushName || "", text, latitude: loc?.degreesLatitude ?? null, longitude: loc?.degreesLongitude ?? null, audio_base64: audioBase64, audio_mime: audio?.mimetype || "" }),
+            body: JSON.stringify({ store_id: storeId, jid: remote, phone: jidToPhone(phoneJid), name: msg.pushName || "", text, latitude: loc?.degreesLatitude ?? null, longitude: loc?.degreesLongitude ?? null, audio_base64: audioBase64, audio_mime: audio?.mimetype || "", media_base64: mediaBase64, media_mime: media?.mimetype || "" }),
           });
         } catch (err) {
           logger.error({ err }, "falha ao repassar mensagem");
@@ -119,7 +125,7 @@ async function sendCopyButton(s, jid, body, label, code) {
 }
 
 const app = express();
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "25mb" }));
 app.use((req, res, next) => (TOKEN && req.get("x-internal-token") !== TOKEN ? res.status(401).json({ detail: "unauthorized" }) : next()));
 const sid = (req) => String(req.get("x-store-id") || "");
 const needStore = (req, res, next) => (sid(req) ? next() : res.status(400).json({ detail: "x-store-id obrigatório" }));
@@ -147,8 +153,13 @@ app.post("/reconnect", needStore, async (req, res) => {
 app.post("/send", needStore, async (req, res) => {
   try {
     const s = session(sid(req));
-    const { to, text, pix_key, pix_code, pix_qr } = req.body || {};
+    const { to, text, pix_key, pix_code, pix_qr, images } = req.body || {};
     const jid = await sendText(s, to, text);
+    for (const img of images || []) {  // menu photos: uploaded (data URL) or https URL
+      const src = String(img.image || "");
+      const image = src.startsWith("data:") ? Buffer.from(src.split(",")[1] || "", "base64") : { url: src };
+      try { await s.sock.sendMessage(jid, { image, caption: img.caption || "" }); } catch (err) { logger.warn({ err }, "foto do cardápio falhou"); }
+    }
     if (pix_code) {
       if (pix_qr) await s.sock.sendMessage(jid, { image: Buffer.from(pix_qr.split(",")[1] || "", "base64"), caption: "QR Code Pix com o valor do seu pedido 👆" });
       await sendCopyButton(s, jid, "Ou toque no botão para copiar o Pix Copia e Cola:", "Copiar código Pix", pix_code);

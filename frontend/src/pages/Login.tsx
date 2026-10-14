@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import type { PlanOption, User } from "@/lib/types";
 import { formatCurrency } from "@/lib/types";
 import { FEATURE_LABELS } from "@/lib/plans";
+import { GoogleButton } from "@/components/AuthCallback";
 import { Armchair, Bike, Bot, Check, ChefHat, ClipboardList, Crown, Headphones, Lock, MapPin, Mic, QrCode, Sparkles, Users, Wallet } from "lucide-react";
 
 const HERO = "https://images.unsplash.com/photo-1618417376251-a9b0894035b4?crop=entropy&cs=srgb&fm=jpg&q=85&w=1400";
@@ -85,6 +86,7 @@ export default function Login() {
 
     <Dialog open={open} onOpenChange={setOpen}><DialogContent className="border-stone-200 bg-[#F9F8F6] sm:max-w-md" data-testid="login-form-container">
       <DialogHeader><DialogTitle className="flex items-center gap-2"><img src="/logo.svg" alt="" className="h-7 w-7" /> Entrar no PedeFácil</DialogTitle></DialogHeader>
+      <GoogleButton label="Entrar com Google" /><div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.14em] text-stone-400"><span className="h-px flex-1 bg-stone-200" />ou com e-mail<span className="h-px flex-1 bg-stone-200" /></div>
       <form onSubmit={submit} className="space-y-4" data-testid="login-form">
         <div><Label htmlFor="login-email">E-mail</Label><Input id="login-email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="voce@restaurante.com" className="mt-1.5 bg-white" data-testid="login-email-input" /></div>
         <div><Label htmlFor="login-password">Senha</Label><Input id="login-password" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1.5 bg-white" data-testid="login-password-input" /></div>

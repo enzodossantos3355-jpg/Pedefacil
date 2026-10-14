@@ -11,7 +11,8 @@ import { Label } from "@/components/ui/label";
 import type { DayStatus, User, WhatsAppStatus } from "@/lib/types";
 import { formatCurrency } from "@/lib/types";
 import { usePlan } from "@/lib/plans";
-import { Armchair, Crown, LifeBuoy, Lock, UsersRound, Archive, BarChart3, Bell, Boxes, ChevronLeft, ChevronRight, CircleUserRound, ClipboardList, CookingPot, Headphones, LayoutDashboard, LogOut, Menu, Settings2, Users, UtensilsCrossed, Wifi, X } from "lucide-react";
+import NotificationBell from "@/components/NotificationBell";
+import { Bike, Armchair, Crown, LifeBuoy, Lock, UsersRound, Archive, BarChart3, Boxes, ChevronLeft, ChevronRight, CircleUserRound, ClipboardList, CookingPot, Headphones, LayoutDashboard, LogOut, Menu, Settings2, Users, UtensilsCrossed, Wifi, X } from "lucide-react";
 
 type NavItem = { label: string; path: string; icon: typeof LayoutDashboard; feature?: string; tablesOnly?: boolean };
 const navItems: NavItem[] = [
@@ -19,6 +20,7 @@ const navItems: NavItem[] = [
   { label: "Pedidos", path: "/pedidos", icon: ClipboardList },
   { label: "Mesas", path: "/mesas", icon: Armchair, feature: "mesas", tablesOnly: true },
   { label: "Atendimento WhatsApp", path: "/atendimento", icon: Headphones, feature: "whatsapp_ia" },
+  { label: "Entregadores", path: "/entregadores", icon: Bike, feature: "motoboys" },
   { label: "Clientes Salvos", path: "/clientes", icon: Users },
   { label: "Cardápio", path: "/produtos", icon: UtensilsCrossed },
   { label: "Relatórios", path: "/relatorios", icon: BarChart3 },
@@ -99,7 +101,7 @@ export default function AppShell() {
       <div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[84px]" : "lg:pl-72"}`}>
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-[#E7E5E4] bg-white/90 px-4 backdrop-blur sm:px-8" data-testid="app-header">
           <div className="flex items-center gap-3"><button className="rounded-lg p-2 text-stone-500 hover:bg-stone-100 lg:hidden" onClick={() => setMobileOpen(true)} data-testid="mobile-menu-button" aria-label="Abrir menu"><Menu size={20} /></button><button onClick={() => setCashOpen(true)} className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${isOpen ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-700"}`} data-testid="cash-status-button"><span className={`h-2 w-2 rounded-full ${isOpen ? "bg-emerald-500" : "bg-red-500"}`} />Caixa {isOpen ? "Aberto" : "Fechado"}<span className="hidden font-normal text-stone-500 sm:inline">• {day.data?.total_orders ?? 0} pedidos</span></button><Badge className="hidden border-emerald-200 bg-emerald-50 text-emerald-800 sm:inline-flex" data-testid="assistant-status-badge"><CookingPot size={13} className="mr-1" /> Operação ativa</Badge></div>
-          <div className="flex items-center gap-3"><button className="relative rounded-lg p-2 text-stone-500 hover:bg-stone-100" data-testid="notifications-button" aria-label="Notificações"><Bell size={19} /><span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-[#C5533B]" /></button><div className="hidden items-center gap-2 border-l border-stone-200 pl-3 sm:flex"><span className="text-right"><strong className="block text-xs">{displayUser.name}</strong><small className="block text-[10px] text-stone-500">{displayUser.role === "admin" ? "Administrador" : "Atendente"}</small></span><CircleUserRound size={21} className="text-stone-400" /></div></div>
+          <div className="flex items-center gap-3"><NotificationBell /><div className="hidden items-center gap-2 border-l border-stone-200 pl-3 sm:flex"><span className="text-right"><strong className="block text-xs">{displayUser.name}</strong><small className="block text-[10px] text-stone-500">{displayUser.role === "admin" ? "Administrador" : "Atendente"}</small></span><CircleUserRound size={21} className="text-stone-400" /></div></div>
         </header>
         {plan?.plan === "trial" && <Link to="/planos" className="flex items-center justify-center gap-2 bg-amber-100 px-4 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-200" data-testid="trial-banner"><Crown size={14} /> Teste grátis: {plan.trial_days_left} dia(s) restantes · funções limitadas · Conheça os planos</Link>}
         <main className="mx-auto w-full max-w-[1440px] p-4 sm:p-6 lg:p-8" data-testid="main-content"><Outlet /></main>

@@ -14,6 +14,7 @@ from lib.db import db
 from lib.geo import coords_from_text, find_cep, quote_fee_full
 from lib.pix import gerar_pix
 from lib.stt import transcribe_audio
+from lib.receipt import check_receipt, read_receipt
 from lib.tastes import taste_profile
 from models.domain import (
     Chat, ChatMessage, DescriptionRequest, HumanToggle, IncomingMessage, MessageCreate, Order, OrderCreate,
@@ -116,10 +117,11 @@ async def toggle_human(chat_id: str, input: HumanToggle):
 
 def build_system(settings: dict, products: list[dict], zones: list[dict], customer: dict | None, fee_note: str, tastes: dict | None = None) -> str:
     def fmt(options: list[dict]) -> str:
-        return ", ".join("{} R$ {:.2f}".format(o["name"], o["price"]) for o in options)
+        return ", ".join(f"{o['name']} R$ {o['price']:.2f}" + (f" (apelidos: {'/'.join(o['aliases'])})" if o.get("aliases") else "") for o in options)
 
     menu = "\n".join(
         f"- id={p['product_id']} | {p['name']} ({p['category']}) R$ {p['price']:.2f}"
+        + (" | o cliente pode chamar de: " + ", ".join(p["aliases"]) if p.get("aliases") else "")
         + (" | tamanhos: " + fmt(p["sizes"]) if p.get("sizes") else "")
         + (" | adicionais: " + fmt(p["additionals"]) if p.get("additionals") else "")
         + (f" | estoque: {p['stock']}" if p.get("stock") is not None else "")
@@ -152,23 +154,26 @@ GOSTOS DO CLIENTE (aprendidos do histórico de pedidos):
 - Se o cliente revelar um gosto ou restrição nova (ex.: "não como carne", "amo farofa"), registre em "preferences".
 REGRAS:
 - Mensagens CURTAS no estilo WhatsApp: no máximo 2 a 3 linhas. Nada de blocos longos.
-- Na primeira mensagem, cumprimente pelo nome; se for recorrente, mostre que reconhece ("que bom te ver de novo").
-- Ao apresentar o cardápio, liste os pratos ativos com preço, tamanhos (P, M, G) e adicionais de forma enxuta.
+- Na primeira mensagem, cumprimente pelo nome (se recorrente, mostre que reconhece) e pergunte o que deseja. NÃO mande o cardápio sem o cliente pedir.
+- Só quando o cliente pedir o cardápio ("cardápio", "o que tem hoje", "menu"): liste os pratos ativos com preço, tamanhos e adicionais de forma enxuta e use "send_menu": true (o sistema envia as fotos dos pratos).
 - SEJA RÁPIDO: assim que o cliente disser o que quer (ex: "quero 3 marmitas"), FECHE O PEDIDO NA HORA com intent "order_confirmed". NÃO peça confirmação e NÃO repita perguntas.
 - RETIRADA é o padrão: se o cliente não falar em entrega, use delivery_type "Retirada". NUNCA pergunte se é entrega ou retirada. Ao fechar retirada, informe o endereço da loja com o link do Maps.
-- NUNCA pergunte a forma de pagamento. Use payment_method "Pendente", a não ser que o próprio cliente diga como vai pagar (aí registre o que ele disse).
+- PAGAMENTO: em RETIRADA nunca pergunte a forma de pagamento. Em ENTREGA, depois do endereço, pergunte uma vez como vai pagar (Pix, dinheiro ou cartão; se dinheiro, pergunte o troco). Registre em order.payment_intent o que o cliente DISSE que vai usar. Dizer a forma de pagamento NÃO é pagar: NUNCA diga que o pagamento foi feito/confirmado.
 - Se o produto tem tamanhos e o cliente não disse qual, use o tamanho M (ou o primeiro disponível) sem perguntar.
 - ENTREGA (só quando o cliente pedir entrega): se não houver endereço nem localização, peça apenas o endereço ou a localização. Com endereço ou localização, feche o pedido informando a taxa. Se veio só a localização, feche e peça o complemento (número, apto, referência) na mesma mensagem.
-- Se o cliente mandar um complemento, alteração ou novo item depois de fechar, use "order_confirmed" de novo com o pedido COMPLETO atualizado (o sistema atualiza o mesmo pedido).
-- Se o cliente escolher Pix ou pedir a chave, use "send_pix": true (o sistema envia a chave e o botão Copiar chave Pix; não escreva a chave no texto).
+- ALTERAÇÕES: se o cliente mudar, adicionar ou tirar itens, trocar endereço ou complemento depois de fechar, use "order_confirmed" de novo com o pedido COMPLETO e atualizado. O sistema EDITA o mesmo pedido desta conversa (nunca cria outro); diga "pedido atualizado".
+- OBSERVAÇÕES: se o cliente pedir algo especial (ex.: "sem cebola", "molho à parte", "tocar o interfone"), coloque em order.notes.
+- PIX: só depois que o pedido estiver fechado. Se o cliente quiser pagar com Pix ou pedir a chave, use "send_pix": true (o sistema envia o Pix; não escreva a chave) e peça para ele mandar o COMPROVANTE aqui depois de pagar. Antes de fechar o pedido, não mande Pix: feche o pedido primeiro.
+- COMPROVANTES: o sistema confere o comprovante sozinho. Nunca afirme que um pagamento foi recebido.
 - O telefone do cliente já é conhecido pelo WhatsApp: NUNCA pergunte o telefone. Números de casa/rua não são telefone.
 - Só ofereça itens do cardápio acima.
+- Ao fechar o pedido, NÃO escreva preços nem totais: o sistema envia logo abaixo o resumo oficial com o valor correto. Só fale preço quando o cliente perguntar quanto custa um item.
 - Se pedir para cancelar ("cancelar pedido", "não quero mais", "desisto"), confirme com educação e use intent "cancel". Se pedir atendente/gerente/humano, use intent "human".
 - NUNCA use ferramentas, tags XML, markdown, blocos de código ou termos técnicos. O campo "reply" é exatamente o que o cliente vai ler.
 {settings['ai_custom_instructions']}
 Responda SOMENTE com JSON válido:
-{{"reply": "texto para o cliente", "send_pix": false, "intent": "chat|order_confirmed|cancel|human", "preferences": ["preferências alimentares detectadas"],
- "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": ["nome"]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_method": "Pendente|Pix|Dinheiro|Cartão Crédito|Cartão Débito", "notes": ""}}}}"""
+{{"reply": "texto para o cliente", "send_pix": false, "send_menu": false, "intent": "chat|order_confirmed|cancel|human", "preferences": ["preferências alimentares detectadas"],
+ "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": ["nome"]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_intent": "|Pix|Dinheiro|Cartão Crédito|Cartão Débito", "notes": ""}}}}"""
 
 
 REPLY_RE = re.compile(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', re.S)
@@ -212,10 +217,44 @@ def price_items(raw_items: list[dict], products: dict[str, dict]) -> list[OrderI
         if not p:
             continue
         size = next((s for s in p.get("sizes", []) if s["name"].lower() == str(it.get("size", "")).lower()), None)
-        adds = [a for a in p.get("additionals", []) if a["name"].lower() in [str(x).lower() for x in it.get("additionals", [])]]
+        wanted = [str(x).lower().strip() for x in it.get("additionals", [])]
+        adds = [a for a in p.get("additionals", []) if any(w in [a["name"].lower(), *[al.lower() for al in a.get("aliases", [])]] for w in wanted)]
         unit = (size["price"] if size else p["price"]) + sum(a["price"] for a in adds)
         items.append(OrderItem(product_id=p["product_id"], name=p["name"], price=unit, quantity=max(1, int(it.get("quantity", 1))), size=size["name"] if size else "", additionals=adds))
     return items
+
+
+OPEN_STATUSES = {"$nin": ["Concluído", "Cancelado"]}
+
+
+async def linked_order(doc: dict, phone: str) -> dict | None:
+    """The order this conversation is working on: the chat's linked order if still open, else the latest open one."""
+    if doc.get("order_id"):
+        o = await db.orders.find_one({"order_id": doc["order_id"], "status": OPEN_STATUSES})
+        if o:
+            return o
+    return await db.orders.find_one({"customer_phone": phone, "source": "whatsapp", "status": OPEN_STATUSES}, sort=[("created_at", -1)])
+
+
+async def handle_receipt(input: IncomingMessage, doc: dict, phone: str, to: str, settings: dict) -> Chat | None:
+    """Photo/PDF from the customer: validates it as a Pix receipt for the open order (strict), else describes it."""
+    try:
+        data = await read_receipt(input.media_base64, input.media_mime)
+    except Exception as exc:
+        logger.error("leitura de arquivo falhou: %s", exc)
+        data = {}
+    order = await linked_order(doc, phone)
+    if not data.get("is_receipt") or not order or order.get("payment_status") == "pago":
+        input.text = f"{input.text} [o cliente enviou {'um PDF' if 'pdf' in input.media_mime else 'uma imagem'}: {data.get('description') or 'não foi possível ler'}]".strip()
+        return None
+    paid, note = check_receipt(data, order["total"], settings)
+    upd = {"payment_status": "pago", "payment_method": "Pix", "receipt_note": note} if paid else {"payment_status": "em_verificacao", "receipt_note": note}
+    await db.orders.update_one({"order_id": order["order_id"]}, {"$set": upd})
+    text = ("Comprovante conferido ✅ Pagamento do pedido #{id} confirmado. Obrigado!" if paid
+            else "Recebi seu comprovante 📎 mas não consegui confirmar automaticamente (valor ou recebedor diferentes). Nossa equipe vai conferir e te avisa já já 🙏").format(id=order["order_id"][-6:].upper())
+    doc = await push_message(doc["chat_id"], "bot", text, {} if paid else {"status": "needs_human"})
+    await wa_send(to, text)
+    return await chat_with_order(doc)
 
 
 async def process_message(input: IncomingMessage, simulated: bool = False) -> Chat:
@@ -240,7 +279,10 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
     if not existing:
         await db.chats.insert_one(Chat(chat_id=chat_id, customer_name=input.name or "Cliente WhatsApp", phone=phone, jid="" if simulated else input.jid).model_dump())
     loc_extra = {"last_lat": input.latitude, "last_lng": input.longitude} if input.latitude is not None else {}
-    doc = await push_message(chat_id, "customer", input.text, loc_extra)
+    if loc_extra:  # keep the GPS point for the courier: CRM + any open delivery order of this customer
+        await db.customers.update_one({"phone": phone}, {"$set": loc_extra})
+        await db.orders.update_many({"customer_phone": phone, "status": {"$nin": ["Concluído", "Cancelado"]}}, {"$set": {"latitude": input.latitude, "longitude": input.longitude}})
+    doc = await push_message(chat_id, "customer", input.text or ("📎 Arquivo enviado" if input.media_base64 else ""), loc_extra)
     if doc.get("is_human_controlled"):
         return await chat_with_order(doc)
 
@@ -259,6 +301,10 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
         await wa_send(to, text)
         return await chat_with_order(doc)
 
+    if input.media_base64:
+        done = await handle_receipt(input, doc, phone, to, settings)
+        if done:
+            return done
     products = await db.products.find({}, {"_id": 0}).to_list(500)
     zones = await db.delivery_zones.find({}, {"_id": 0}).to_list(500)
     customer = await db.customers.find_one({"phone": phone}, {"_id": 0})
@@ -281,8 +327,8 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
     if intent == "human":
         extra = {"is_human_controlled": True, "status": "needs_human"}
     elif intent == "cancel":
-        last = await db.orders.find_one({"customer_phone": phone, "status": {"$nin": ["Concluído", "Cancelado"]}}, sort=[("created_at", -1)])
-        if last:
+        last = await linked_order(doc, phone)
+        if last:  # stays in the history as Cancelado
             await update_order_status(last["order_id"], StatusUpdate(status="Cancelado"))
         extra = {"status": "completed"}
     elif intent == "order_confirmed":
@@ -290,31 +336,43 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
         items = price_items(o.get("items", []), {p["product_id"]: p for p in products})
         if items:
             dtype = o.get("delivery_type") or "Retirada"
-            open_order = await db.orders.find_one({"customer_phone": phone, "source": "whatsapp", "status": "Em Análise"}, sort=[("created_at", -1)])
-            if open_order:  # re-confirmation updates the open order instead of duplicating it
-                order = await update_order(open_order["order_id"], OrderUpdate(delivery_type=dtype, address=o.get("address") or open_order.get("address", ""), payment_method=o.get("payment_method") or open_order.get("payment_method"), notes=o.get("notes") or open_order.get("notes", ""), items=items, delivery_fee=0.0 if dtype == "Retirada" else None))
-            else:
-                order = await create_order_record(OrderCreate(customer_name=doc["customer_name"], customer_phone=phone, delivery_type=dtype, address=o.get("address", ""), payment_method=o.get("payment_method") or "Pendente", notes=o.get("notes", ""), items=items, latitude=lat, longitude=lng, status="Em Análise", source="whatsapp"))
+            intent_pay = (o.get("payment_intent") or "").strip()
+            open_order = await linked_order(doc, phone)
+            updated = bool(open_order)
+            if open_order:  # changes EDIT this conversation's order (never a duplicate); payment stays as it is
+                order = await update_order(open_order["order_id"], OrderUpdate(delivery_type=dtype, address=o.get("address") or open_order.get("address", ""), payment_intent=intent_pay or open_order.get("payment_intent", ""), notes=o.get("notes") or open_order.get("notes", ""), items=items, delivery_fee=0.0 if dtype == "Retirada" else None))
+            else:  # saying how you'll pay is NOT paying: payment_method stays Pendente until a receipt is verified
+                order = await create_order_record(OrderCreate(customer_name=doc["customer_name"], customer_phone=phone, delivery_type=dtype, address=o.get("address", ""), payment_method="Pendente", payment_intent=intent_pay, notes=o.get("notes", ""), items=items, latitude=lat, longitude=lng, status="Em Análise", source="whatsapp"))
+            if lat is not None:  # remember the customer's GPS point in the CRM for the next deliveries
+                await db.customers.update_one({"phone": phone}, {"$set": {"last_lat": lat, "last_lng": lng}})
             brl = lambda v: f"{v:.2f}".replace(".", ",")
-            reply = f"{reply}\n\n🧾 Pedido #{order.order_id[-6:].upper()} • Total R$ {brl(order.total)} (taxa R$ {brl(order.delivery_fee)}). Está em análise e logo confirmamos!".strip()
-            extra = {"status": "in_review"}
-            if order.payment_method == "Pix":
+            head = "Pedido atualizado" if updated else "Pedido"
+            reply = f"{reply}\n\n🧾 {head} #{order.order_id[-6:].upper()} • Total R$ {brl(order.total)} (taxa R$ {brl(order.delivery_fee)}). Está em análise e logo confirmamos!".strip()
+            extra = {"status": "in_review", "order_id": order.order_id}
+            if order.payment_intent == "Pix" and order.payment_status != "pago":
                 data["send_pix"] = True
     pix_key, pix_code, pix_qr = "", "", ""
+    open_now = await linked_order({**doc, **extra}, phone)
+    if data.get("send_pix") and not open_now:
+        data["send_pix"] = False  # Pix only after the order is closed
     if data.get("send_pix") and settings["pix_key"]:
         if settings["pix_mode"] == "brcode" and has_feature("pix_qr"):
-            last = await db.orders.find_one({"customer_phone": phone, "status": {"$nin": ["Concluído", "Cancelado"]}}, sort=[("created_at", -1)])
-            pix = await gerar_pix(last["total"], last["order_id"], settings) if last else None
+            pix = await gerar_pix(open_now["total"], open_now["order_id"], settings)
             if pix:
                 pix_code, pix_qr = pix["copiaECola"], pix["qrCodeBase64"]
         if not pix_code:
             pix_key = settings["pix_key"]
+    if pix_code or pix_key:
+        reply = f"{reply}\n\nDepois de pagar, me manda o comprovante aqui (foto ou PDF) 📎"
+    menu_images = [{"image": p["image_url"], "caption": f"{p['name']} · R$ {p['price']:.2f}".replace(".", ",")} for p in products if data.get("send_menu") and p.get("active") and p.get("image_url")][:10]
     doc = await push_message(chat_id, "bot", reply, extra)
+    if menu_images:
+        await push_message(chat_id, "bot", f"📸 {len(menu_images)} foto(s) do cardápio enviadas")
     if pix_code:
         await push_message(chat_id, "bot", f"QR Code Pix + Pix Copia e Cola: {pix_code}")
     elif pix_key:
         await push_message(chat_id, "bot", f"Chave Pix ({settings['pix_key_type']}): {pix_key}")
-    await wa_send(to, reply, pix_key, pix_code, pix_qr)
+    await wa_send(to, reply, pix_key, pix_code, pix_qr, menu_images)
     return await chat_with_order(await db.chats.find_one({"chat_id": chat_id}))
 
 

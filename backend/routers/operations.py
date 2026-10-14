@@ -1,3 +1,4 @@
+from urllib.parse import quote_plus
 import io
 import json
 import zipfile
@@ -18,7 +19,7 @@ from lib.tastes import all_profiles
 from models.domain import (
     LEGACY_STATUS, STATUS_FLOW, Courier, CourierCreate, Customer, CustomerCreate, DashboardSummary, DayOpenRequest, DayStatus,
     DeliveryZone, DeliveryZoneCreate, FeeQuote, FeeQuoteResult, Order, OrderCreate, OrderUpdate, Product,
-    PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
+    AppNotification, PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
 )
 import os
 
@@ -109,7 +110,9 @@ async def create_order_record(input: OrderCreate) -> Order:
         else:
             q = await quote_fee_full(await db.delivery_zones.find().to_list(500), await get_settings(), input.latitude, input.longitude, input.address)
             fee, zone_name = q["fee"], q["zone_name"]
-    order = Order(**input.model_dump(exclude={"delivery_fee"}), subtotal=subtotal, delivery_fee=fee, zone_name=zone_name, total=round(subtotal + fee, 2))
+    order = Order(**input.model_dump(exclude={"delivery_fee"}), subtotal=subtotal, delivery_fee=fee, zone_name=zone_name, total=round(max(0.0, subtotal + fee + input.surcharge - input.discount), 2))
+    if order.source != "whatsapp" and order.payment_method != "Pendente":
+        order.payment_status = "pago"  # staff chose the method at the counter
     order.pix_copia_e_cola = await pix_code_for(order.total, order.order_id)
     await db.orders.insert_one(order.model_dump())
     for item in input.items:  # automatic stock decrement
@@ -135,10 +138,12 @@ async def update_order(order_id: str, input: OrderUpdate):
     if not current:
         raise HTTPException(status_code=404, detail="Pedido não encontrado.")
     data = input.model_dump(exclude_none=True)
+    if data.get("payment_method", "Pendente") != "Pendente" and "payment_status" not in data:
+        data["payment_status"] = "pago"  # staff set the method in the panel
     items = data.get("items", current["items"])
     fee = data.get("delivery_fee", current.get("delivery_fee", 0))
     data["subtotal"] = sum(i["price"] * i["quantity"] for i in items)
-    data["total"] = round(data["subtotal"] + fee, 2)
+    data["total"] = round(max(0.0, data["subtotal"] + fee + data.get("surcharge", current.get("surcharge", 0)) - data.get("discount", current.get("discount", 0))), 2)
     if data["total"] != current.get("total"):
         data["pix_copia_e_cola"] = await pix_code_for(data["total"], order_id)
     updated = await db.orders.find_one_and_update({"order_id": order_id}, {"$set": data}, return_document=ReturnDocument.AFTER)
@@ -159,6 +164,44 @@ async def notify_status(order: Order) -> None:
         await wa_send(order.customer_phone, text)
 
 
+@router.get("/notifications", response_model=list[AppNotification])
+async def notifications():
+    """Panel bell: new orders waiting, conversations asking for a human, Pix receipts to check."""
+    out: list[AppNotification] = []
+    for o in await db.orders.find({"status": {"$in": ["Em Análise", "Novo"]}}).sort("created_at", -1).to_list(30):
+        out.append(AppNotification(id=f"o-{o['order_id']}-{o['status']}", kind="new_order", title=f"Pedido #{o['order_id'][-6:].upper()} · {o['status']}", detail=f"{o['customer_name']} · R$ {o['total']:.2f}", link="/pedidos", created_at=o["created_at"]))
+    for o in await db.orders.find({"payment_status": "em_verificacao"}).to_list(30):
+        out.append(AppNotification(id=f"r-{o['order_id']}", kind="receipt", title=f"Comprovante para conferir · #{o['order_id'][-6:].upper()}", detail=o.get("receipt_note", "")[:120], link="/pedidos", created_at=o["created_at"]))
+    for c in await db.chats.find({"status": "needs_human"}).to_list(30):
+        out.append(AppNotification(id=f"h-{c['chat_id']}-{len(c.get('messages', []))}", kind="needs_human", title=f"{c['customer_name']} pediu um atendente", detail=c.get("last_message", "")[:120], link="/atendimento", created_at=c.get("last_timestamp") or c.get("created_at")))
+    return sorted(out, key=lambda n: n.created_at, reverse=True)
+
+
+@router.post("/orders/{order_id}/send-courier", dependencies=[need("motoboys")])
+async def send_to_courier(order_id: str):
+    """Sends the delivery sheet (with the customer's GPS route) to the assigned courier's WhatsApp."""
+    order = await db.orders.find_one({"order_id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado.")
+    courier = await db.couriers.find_one({"courier_id": order.get("courier_id", "")}) if order.get("courier_id") else None
+    if not courier or not courier.get("phone"):
+        raise HTTPException(status_code=422, detail="Atribua um entregador com telefone ao pedido.")
+    route = (f"https://www.google.com/maps/dir/?api=1&destination={order['latitude']},{order['longitude']}" if order.get("latitude") is not None
+             else f"https://www.google.com/maps/search/?api=1&query={quote_plus(order.get('address', ''))}")
+    items = "\n".join(f"• {i['quantity']}x {i['name']}{' ' + i['size'] if i.get('size') else ''}" for i in order["items"])
+    if order.get("payment_status") == "pago":
+        pay = f"✅ JÁ PAGO ({order.get('payment_method') or 'Pix'}) — não cobrar"
+    else:
+        how = order.get("payment_intent") or (order.get("payment_method") if order.get("payment_method") != "Pendente" else "") or "a combinar"
+        pay = f"💵 COBRAR NA ENTREGA R$ {order['total']:.2f} • {how}"
+    notes = f"\n📝 Obs: {order['notes']}" if order.get("notes") else ""
+    text = (f"🛵 ENTREGA #{order_id[-6:].upper()}\n👤 {order['customer_name']}\n📞 {order.get('customer_phone') or 'sem telefone'}\n"
+            f"📍 {order.get('address') or 'ver localização'}\n🗺️ Localização: {route}\n\n🍱 Pedido:\n{items}{notes}\n\n{pay}\n🧾 Total R$ {order['total']:.2f} (taxa R$ {order.get('delivery_fee', 0):.2f})")
+    if not await wa_send(courier["phone"], text):
+        raise HTTPException(status_code=409, detail="WhatsApp da loja desconectado. Conecte em Configurações.")
+    return {"ok": True}
+
+
 @router.patch("/orders/{order_id}/status", response_model=Order, dependencies=OPEN_DAY)
 async def update_order_status(order_id: str, input: StatusUpdate):
     if input.status not in STATUS_FLOW:
@@ -168,6 +211,11 @@ async def update_order_status(order_id: str, input: StatusUpdate):
         raise HTTPException(status_code=404, detail="Pedido não encontrado.")
     order = Order(**updated)
     await notify_status(order)
+    if order.status == "Em Entrega" and order.courier_id:  # leaving for delivery: sheet goes to the courier automatically
+        try:
+            await send_to_courier(order_id)
+        except HTTPException:
+            pass
     return order
 
 
@@ -315,9 +363,22 @@ async def list_couriers():
     couriers = [Courier(**d) for d in await db.couriers.find().sort("name", 1).to_list(500)]
     orders = await all_orders()
     for c in couriers:
-        mine = [o for o in orders if o.courier_id == c.courier_id and o.created_at.strftime("%Y-%m-%d") == today and o.status != "Cancelado"]
-        c.deliveries_today, c.fees_today = len(mine), sum(o.delivery_fee for o in mine)
+        mine = [o for o in orders if o.courier_id == c.courier_id and o.delivery_type == "Entrega" and o.created_at.strftime("%Y-%m-%d") == today and o.status in ("Em Entrega", "Concluído")]
+        c.deliveries_today, c.fees_today = len(mine), round(sum(o.delivery_fee for o in mine), 2)
+        c.working_today = c.working_date == today
     return couriers
+
+
+@router.post("/couriers/{courier_id}/working", response_model=Courier, dependencies=[need("motoboys")])
+async def toggle_working(courier_id: str):
+    """Owner picks who is working today; only these couriers can be assigned to deliveries."""
+    c = await db.couriers.find_one({"courier_id": courier_id})
+    if not c:
+        raise HTTPException(status_code=404, detail="Entregador não encontrado.")
+    today = today_iso()
+    c["working_date"] = "" if c.get("working_date") == today else today
+    await db.couriers.update_one({"courier_id": courier_id}, {"$set": {"working_date": c["working_date"]}})
+    return Courier(**{**c, "working_today": c["working_date"] == today})
 
 
 @router.post("/couriers", response_model=Courier, dependencies=[need("motoboys")])

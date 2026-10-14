@@ -5,7 +5,8 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "bundle": "esbuild index.js --bundle --platform=node --format=esm --target=node20 --outfile=bundle/bridge.mjs --external:sharp --external:jimp --external:link-preview-js --external:audio-decode --external:qrcode-terminal --banner:js=\"import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);\""
   },
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc.9",
@@ -13,5 +14,8 @@
     "pino": "^9.6.0",
     "qrcode": "^1.5.4",
     "qrcode-pix": "^5.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.0"
   }
 }

@@ -8,6 +8,8 @@ Multi-restaurant SaaS (formerly "Marmita Hub", based on github.com/enzodossantos
 - `lib/access.py`: session cookie `marmita_session` → user → `enter_store()` sets the tenant and plan contextvars. `active_store` returns 402 when the plan has expired; `need(feature)` returns 403 `{code: plan_required, required_plan, message}`; `check_limit()` returns 403 `plan_limit`.
 - Roles: `admin` and `atendente` (both see the whole store panel), plus `master` (PedeFácil owner, `/master` only). The master is bootstrapped at startup from `.env` MASTER_EMAIL / MASTER_PASSWORD (`routers/auth.py: ensure_master`). There is no demo data or demo login: all demo/test stores were removed and nothing seeds them. New stores start with empty settings. Credentials: memory/test_credentials.md.
 
+- Google login/signup (Emergent-managed OAuth): `components/AuthCallback.tsx` (button → auth.emergentagent.com, redirect `origin + /dashboard`; App.tsx detects `#session_id` via useLocation().hash) → `POST /api/auth/google {session_id}`. The backend verifies it with Emergent session-data. An existing email logs into that account (any role, including master); a new email creates its own store on the trial via `create_store_account`. Our own `marmita_session` cookie is used. Google-only users have no password. See /app/auth_testing.md.
+
 ## Plans (`lib/plans.py` ↔ `frontend/src/lib/plans.ts`)
 - trial (7 days): pedidos, pdv, cardapio, clientes, caixa. Limits: 20 orders, 8 products, 20 customers, 1 user.
 - basico R$49/month: same features as the trial, 2 users.
@@ -30,5 +32,22 @@ Multi-restaurant SaaS (formerly "Marmita Hub", based on github.com/enzodossantos
 - Central de Suporte (`routers/support.py`): stores open tickets; the master replies and resolves them.
 - Dashboard: pause/reopen orders (`/store/toggle-accepting`).
 
+## Products
+- Structured editor (no typed text): nickname tags (`aliases`, the names customers use), optional sizes (rows of name + price), add-ons (rows of name + price + nickname tags) and photo upload from a file (resized in the browser to a JPEG data URL stored in `image_url`). The AI menu prompt includes the nicknames, and `price_items` matches add-ons by name or nickname. The AI never writes totals itself: the system appends the official receipt.
+
+## Customer location → courier
+- A GPS point sent on WhatsApp is saved to the chat (`last_lat/lng`), to every open order of that phone (`latitude/longitude`) and to the CRM (`customers.last_lat/lng`). The order card shows "Localização GPS do cliente" (Maps route). Mais → "Enviar ficha ao motoboy (WhatsApp)" calls `POST /api/orders/{id}/send-courier` (needs `motoboys`, an assigned courier with a phone, and WhatsApp connected).
+- Zones map: when the store has no coordinates, the browser asks for location permission and the map starts there. "Estou na loja: usar minha localização" saves the store position.
+
 ## WhatsApp bridge (`whatsapp-service/index.js`, supervisor program `whatsapp`, port 8002)
+- PRODUCTION has no supervisor program and no Node in the image. `backend/lib/wa_bridge.py` (started in the server.py lifespan) runs the **bundled** `whatsapp-service/dist/bridge.mjs` (esbuild, no node_modules needed) with the Node runtime from the pip package `nodejs-wheel-binaries`, and restarts it if it dies. Embedded mode = no `/etc/supervisor/conf.d/*whatsapp*` (override with WHATSAPP_EMBEDDED). Baileys session files are backed up to Mongo `wa_auth` every 15s and restored on boot, so no QR re-scan after a redeploy. **After editing index.js/pix.js run `cd whatsapp-service && yarn bundle`.**
 - One Baileys session per store (`x-store-id` header), auth at `auth/<store_id>/`. It forwards `{store_id, jid, phone, text, latitude, longitude, audio_base64}` to `/api/whatsapp/incoming` (internal token). Endpoints: /status /start /disconnect /reconnect /send /pix.
+
+## Update — order linking, payments, receipts, couriers, notifications
+- WhatsApp chat has `order_id`: any change (items, address, notes) EDITS that order (`linked_order`), even after the store approved it — never a duplicate. Cancel keeps it in history as Cancelado.
+- Payment: `payment_intent` = what the customer SAID; `payment_status` pendente|em_verificacao|pago. The AI never marks paid. Payment question only for Entrega. Pix only after the order is closed; bot then asks for the receipt.
+- Receipts (photo/PDF) → `lib/receipt.py` (Gemini reads the file; strict Python check: amount == total AND recipient key/name matches AND status completed) → pago, else em_verificacao + needs_human; panel shows "Confirmar pago".
+- Staff choosing a payment method in the panel marks it pago.
+- Menu sent only on request (`send_menu`), with product photos (bridge `/send` images[]). No menu in greeting. Notes from customer requests go to order.notes.
+- Manual order form: sections Cliente (Salvar cliente) / Entrega & Pagamento / Itens (product select) / Valores (Acréscimo, Desconto, Observações) / Total; modes Balcão, Voz, Preencher com IA. Order has surcharge/discount.
+- /entregadores page (plan feature motoboys) — courier CRUD. Header bell: GET /api/notifications (new orders, human requests, receipts to check), 15s poll, sound + browser notification.

@@ -22,6 +22,7 @@ from routers.tables import router as tables_router
 from routers.support import router as support_router
 from fastapi import Depends
 from lib.access import active_store, need
+from lib import wa_bridge
 
 
 # Startup runs before the yield, shutdown after it. Add your own setup/teardown here.
@@ -29,7 +30,11 @@ from lib.access import active_store, need
 async def lifespan(app: FastAPI):
     app.state.index_task = asyncio.create_task(ensure_indexes())  # background: a big index build must not block boot
     app.state.seed_task = asyncio.create_task(ensure_master())
+    app.state.wa_tasks = await wa_bridge.start()  # production: runs the WhatsApp bridge; always: session backup
     yield
+    for task in app.state.wa_tasks:
+        task.cancel()
+    await asyncio.gather(*app.state.wa_tasks, return_exceptions=True)  # lets the bridge leader stop and release its lease
     client.close()
 
 
@@ -42,6 +47,7 @@ api_router.include_router(auth_router)
 api_router.include_router(support_router)  # store user / master per route
 api_router.include_router(billing_router)  # own per-route auth (store user / master / Stripe webhook)
 api_router.include_router(whatsapp_internal_router)  # bridge → backend, internal token
+api_router.include_router(wa_bridge.proxy_router)  # replica → WhatsApp leader replica, internal token
 STORE = [Depends(active_store)]  # session → store (tenant) → plan in force
 api_router.include_router(operations_router, dependencies=STORE)
 api_router.include_router(whatsapp_open_router, dependencies=STORE)
