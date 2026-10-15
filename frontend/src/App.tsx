@@ -16,7 +16,7 @@ import Armazenamento from "@/pages/Armazenamento";
 import Planos, { PaymentResult } from "@/pages/Planos";
 import Suporte from "@/pages/Suporte";
 import Master from "@/pages/Master";
-import Mesas from "@/pages/Mesas";
+import Maintenance from "@/components/Maintenance";
 import Entregadores from "@/pages/Entregadores";
 import Equipe from "@/pages/Equipe";
 import FeatureGate from "@/components/FeatureGate";
@@ -39,7 +39,7 @@ export default function App() {
           <Route path="/clientes" element={<Clientes />} />
           <Route path="/atendimento" element={<FeatureGate feature="whatsapp_ia"><DayGate><Atendimento /></DayGate></FeatureGate>} />
           <Route path="/entregadores" element={<FeatureGate feature="motoboys"><Entregadores /></FeatureGate>} />
-          <Route path="/mesas" element={<FeatureGate feature="mesas"><DayGate><Mesas /></DayGate></FeatureGate>} />
+          <Route path="/mesas" element={<Maintenance />} />
           <Route path="/equipe" element={<Equipe />} />
           <Route path="/planos" element={<Planos />} />
           <Route path="/suporte" element={<Suporte />} />

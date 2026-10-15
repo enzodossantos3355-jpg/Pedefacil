@@ -20,9 +20,9 @@ const FEATURES: { icon: typeof Bot; title: string; text: string }[] = [
   { icon: QrCode, title: "Pix QR Code com valor", text: "QR Code e Copia e Cola travados no total de cada pedido. Grátis, sem taxas." },
   { icon: MapPin, title: "Taxas por área, raio ou CEP", text: "Desenhe zonas no mapa: a IA lê a localização do WhatsApp e calcula o frete." },
   { icon: Bike, title: "Motoboys", text: "Atribua entregas e envie a ficha do pedido para o entregador." },
-  { icon: Armchair, title: "Mesas (opcional)", text: "Abra mesas, lance pedidos para a cozinha e feche a conta do salão." },
+  { icon: Armchair, title: "Mesas (em manutenção)", text: "Módulo de mesas temporariamente em manutenção. Volta em breve." },
   { icon: Users, title: "Clientes (CRM)", text: "Cadastro automático pelo WhatsApp com preferências e histórico." },
-  { icon: Wallet, title: "Caixa do dia", text: "Abertura e fechamento de caixa com histórico arquivado." },
+  { icon: Wallet, title: "Novo dia / Fechar dia", text: "Comece e feche o dia com tudo arquivado: pedidos, entregadores e conversas." },
   { icon: Sparkles, title: "Relatórios com IA", text: "Faturamento, ticket médio e dicas práticas para vender mais." },
   { icon: Mic, title: "Pedido por voz", text: "Dite o pedido no balcão e a IA monta tudo com o seu cardápio." },
 ];

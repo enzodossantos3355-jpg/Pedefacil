@@ -125,7 +125,20 @@ class OrderItem(BaseModel):
     additionals: list[Additional] = []
 
 
+class PaymentPart(BaseModel):
+    method: str  # Pix | Dinheiro | Cartão Crédito | Cartão Débito
+    amount: float = Field(ge=0)
+
+
+def pix_amount(order: dict) -> float:
+    """Amount to charge by Pix: the Pix part of a split payment, else the whole order."""
+    parts = [p for p in order.get("payments") or [] if p.get("method") == "Pix"]
+    return round(sum(p["amount"] for p in parts), 2) if parts else order["total"]
+
+
 class OrderCreate(BaseModel):
+    zone_name: str = ""  # zone picked in the manual form (with its fee)
+    payments: list[PaymentPart] = []  # split payment (2 methods); empty = single payment_method
     surcharge: float = 0  # acréscimo
     discount: float = 0  # desconto
     payment_intent: str = ""  # how the customer SAYS they will pay; never means paid
@@ -147,6 +160,8 @@ class OrderCreate(BaseModel):
 class OrderUpdate(BaseModel):
     surcharge: float | None = None
     discount: float | None = None
+    zone_name: str | None = None
+    payments: list[PaymentPart] | None = None
     payment_intent: str | None = None
     payment_status: Literal["pendente", "em_verificacao", "pago"] | None = None
     customer_name: str | None = None
@@ -166,7 +181,9 @@ class Order(BaseModel):
     discount: float = 0
     payment_intent: str = ""
     payment_status: Literal["pendente", "em_verificacao", "pago"] = "pendente"
-    receipt_note: str = ""  # what the AI read on the Pix receipt
+    receipt_note: str = ""
+    mp_order_id: str = ""  # Mercado Pago Pix order (automatic confirmation)
+    payments: list[PaymentPart] = []  # what the AI read on the Pix receipt
     order_id: str = Field(default_factory=lambda: new_id("ord"))
     customer_name: str
     customer_phone: str = ""
@@ -247,6 +264,7 @@ class StoreSettings(BaseModel):
     ai_custom_instructions: str = ""
     notify_status_changes: bool = True
     default_delivery_fee: float = 5
+    pix_provider: Literal["manual", "mercadopago"] = "manual"  # manual = static Pix + receipt | mercadopago = automatic confirmation
 
 
 class LatLng(BaseModel):
@@ -511,3 +529,13 @@ class DayClose(BaseModel):
 
 class DayCloseDetail(DayClose):
     orders: list[Order] = []
+
+
+class MercadoPagoToken(BaseModel):
+    access_token: str = Field(min_length=20)
+
+
+class MercadoPagoStatus(BaseModel):
+    configured: bool
+    account: str = ""
+    store_id: str = ""  # used to build the webhook URL shown in settings

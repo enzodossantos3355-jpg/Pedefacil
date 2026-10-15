@@ -5,7 +5,7 @@ import type { PlanInfo } from "@/lib/types";
 // Mirrors backend/lib/plans.py
 export const FEATURE_LABELS: Record<string, string> = {
   pedidos: "Pedidos e cozinha", pdv: "PDV / balcão", cardapio: "Cardápio", clientes: "Clientes (CRM)", caixa: "Caixa do dia",
-  whatsapp_ia: "WhatsApp com IA", pix_qr: "Pix QR Code com valor", zonas: "Zonas e taxas de entrega", motoboys: "Motoboys", mesas: "Mesas (opcional)",
+  whatsapp_ia: "WhatsApp com IA", pix_qr: "Pix QR Code com valor", zonas: "Zonas e taxas de entrega", motoboys: "Motoboys", mesas: "Mesas (em manutenção)",
   relatorios_ia: "Relatórios com IA", voz: "Pedido por voz", audio_whatsapp: "IA ouve áudios do WhatsApp", backup: "Backup e restauração", multi_atendentes: "Vários atendentes",
 };
 export const REQUIRED_PLAN: Record<string, "basico" | "padrao" | "pro"> = {

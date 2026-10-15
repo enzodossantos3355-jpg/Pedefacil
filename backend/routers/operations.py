@@ -29,7 +29,6 @@ IMG = [
     "https://images.pexels.com/photos/30635717/pexels-photo-30635717.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
 ]
 STATUS_MESSAGES = {
-    "Novo": "✅ Seu pedido #{id} foi confirmado e já está na fila da cozinha!",
     "Em Preparo": "👩‍🍳 Seu pedido #{id} está sendo preparado.",
     "Pronto": "🍱 Seu pedido #{id} está pronto!",
     "Em Entrega": "🛵 Seu pedido #{id} saiu para entrega e logo chega até você!",
@@ -43,7 +42,7 @@ async def require_open_day() -> None:
     """Orders, PDV, AI and attendance only work while the cash register (caixa) is open."""
     day = await db.day_status.find_one({}) or {}
     if day.get("is_open") is False:
-        raise HTTPException(status_code=409, detail="Caixa fechado. Abra o caixa do dia para operar.")
+        raise HTTPException(status_code=409, detail="Dia fechado. Comece um novo dia para operar.")
 
 
 OPEN_DAY = [Depends(require_open_day)]
@@ -111,7 +110,12 @@ async def create_order_record(input: OrderCreate) -> Order:
         else:
             q = await quote_fee_full(await db.delivery_zones.find().to_list(500), await get_settings(), input.latitude, input.longitude, input.address)
             fee, zone_name = q["fee"], q["zone_name"]
-    order = Order(**input.model_dump(exclude={"delivery_fee"}), subtotal=subtotal, delivery_fee=fee, zone_name=zone_name, total=round(max(0.0, subtotal + fee + input.surcharge - input.discount), 2))
+    zone_name = zone_name or (input.zone_name if input.delivery_type == "Entrega" else "")
+    order = Order(**input.model_dump(exclude={"delivery_fee", "zone_name"}), subtotal=subtotal, delivery_fee=fee, zone_name=zone_name, total=round(max(0.0, subtotal + fee + input.surcharge - input.discount), 2))
+    if len(order.payments) == 2:  # second part is always the remainder of the final total (fee included)
+        order.payments[1].amount = round(max(0.0, order.total - order.payments[0].amount), 2)
+    if order.payments and order.source != "whatsapp":
+        order.payment_method = " + ".join(p.method for p in order.payments)
     if order.source != "whatsapp" and order.payment_method != "Pendente":
         order.payment_status = "pago"  # staff chose the method at the counter
     order.pix_copia_e_cola = await pix_code_for(order.total, order.order_id)
@@ -139,12 +143,18 @@ async def update_order(order_id: str, input: OrderUpdate):
     if not current:
         raise HTTPException(status_code=404, detail="Pedido não encontrado.")
     data = input.model_dump(exclude_none=True)
+    if data.get("payments") and current.get("source") != "whatsapp":  # staff split: shown as "Pix + Dinheiro" (paid)
+        data["payment_method"] = " + ".join(p["method"] for p in data["payments"])
     if data.get("payment_method", "Pendente") != "Pendente" and "payment_status" not in data:
         data["payment_status"] = "pago"  # staff set the method in the panel
     items = data.get("items", current["items"])
     fee = data.get("delivery_fee", current.get("delivery_fee", 0))
     data["subtotal"] = sum(i["price"] * i["quantity"] for i in items)
     data["total"] = round(max(0.0, data["subtotal"] + fee + data.get("surcharge", current.get("surcharge", 0)) - data.get("discount", current.get("discount", 0))), 2)
+    pays = data.get("payments") or current.get("payments") or []
+    if len(pays) == 2:
+        pays[1]["amount"] = round(max(0.0, data["total"] - pays[0]["amount"]), 2)
+        data["payments"] = pays
     if data["total"] != current.get("total"):
         data["pix_copia_e_cola"] = await pix_code_for(data["total"], order_id)
     updated = await db.orders.find_one_and_update({"order_id": order_id}, {"$set": data}, return_document=ReturnDocument.AFTER)
@@ -162,7 +172,8 @@ async def notify_status(order: Order) -> None:
             platform = await raw_db.platform_settings.find_one({}) or {}
             footer = platform.get("footer_text") or "Atendimento feito com PedeFácil"
             text += f"\n\n✨ {footer}" + (f"\n{platform['site_url']}" if platform.get("site_url") else "")
-        await wa_send(order.customer_phone, text)
+        chat = await db.chats.find_one({"phone": order.customer_phone}) or {}
+        await wa_send(chat.get("jid") or order.customer_phone, text)
 
 
 @router.get("/notifications", response_model=list[AppNotification])
@@ -195,6 +206,8 @@ async def send_to_courier(order_id: str):
     else:
         how = order.get("payment_intent") or (order.get("payment_method") if order.get("payment_method") != "Pendente" else "") or "a combinar"
         pay = f"💵 COBRAR NA ENTREGA R$ {order['total']:.2f} • {how}"
+        if order.get("payments"):  # split: Pix part may already be paid, only the rest is collected
+            pay = "💵 PAGAMENTO DIVIDIDO: " + " + ".join(f"{p['method']} R$ {p['amount']:.2f}" for p in order["payments"])
     notes = f"\n📝 Obs: {order['notes']}" if order.get("notes") else ""
     text = (f"🛵 ENTREGA #{order_id[-6:].upper()}\n👤 {order['customer_name']}\n📞 {order.get('customer_phone') or 'sem telefone'}\n"
             f"📍 {order.get('address') or 'ver localização'}\n🗺️ Localização: {route}\n\n🍱 Pedido:\n{items}{notes}\n\n{pay}\n🧾 Total R$ {order['total']:.2f} (taxa R$ {order.get('delivery_fee', 0):.2f})")

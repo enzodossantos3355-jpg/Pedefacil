@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -15,8 +16,10 @@ from lib.geo import coords_from_text, find_cep, quote_fee_full
 from lib.pix import gerar_pix
 from lib.stt import transcribe_audio
 from lib.receipt import check_receipt, read_receipt
+from lib.mercadopago import confirm_if_paid, create_pix, store_token
 from lib.tastes import taste_profile
 from models.domain import (
+    PaymentPart, pix_amount,
     Chat, ChatMessage, DescriptionRequest, HumanToggle, IncomingMessage, MessageCreate, Order, OrderCreate,
     OrderItem, SimulateMessage, TextRequest, WhatsAppStart, now_utc,
 )
@@ -109,10 +112,18 @@ async def delete_message(chat_id: str, message_id: str):
 
 @router.post("/whatsapp/chats/{chat_id}/toggle-human", response_model=Chat)
 async def toggle_human(chat_id: str, input: HumanToggle):
-    doc = await db.chats.find_one_and_update({"chat_id": chat_id}, {"$set": {"is_human_controlled": input.enable_human, "status": "needs_human" if input.enable_human else "bot_active"}}, return_document=ReturnDocument.AFTER)
+    doc = await db.chats.find_one_and_update({"chat_id": chat_id}, {"$set": {"is_human_controlled": input.enable_human, "status": "human" if input.enable_human else "bot_active"}}, return_document=ReturnDocument.AFTER)
     if not doc:
         raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+    text = HANDOFF_TEXT if input.enable_human else BACK_TO_AI_TEXT
+    doc = await push_message(chat_id, "bot", text)
+    await wa_send(doc.get("jid") or doc["phone"], text)
     return await chat_with_order(doc)
+
+
+HANDOFF_TEXT = "👋 Um atendente da nossa equipe vai assumir o seu atendimento agora. Só um instante!"
+BACK_TO_AI_TEXT = "🤖 Seu atendimento voltou para a nossa assistente virtual. Pode me dizer o que precisa 😊"
+_chat_locks: dict[str, asyncio.Lock] = {}
 
 
 def build_system(settings: dict, products: list[dict], zones: list[dict], customer: dict | None, fee_note: str, tastes: dict | None = None) -> str:
@@ -157,14 +168,15 @@ REGRAS:
 - Mensagens CURTAS no estilo WhatsApp: no máximo 2 a 3 linhas. Nada de blocos longos.
 - Na primeira mensagem, cumprimente pelo nome (se recorrente, mostre que reconhece) e pergunte o que deseja. NÃO mande o cardápio sem o cliente pedir.
 - Só quando o cliente pedir o cardápio ("cardápio", "o que tem hoje", "menu"): liste os pratos ativos com preço, tamanhos e adicionais de forma enxuta e use "send_menu": true (o sistema envia as fotos dos pratos).
-- CONFIRMAÇÃO DO PEDIDO: quando o cliente disser o que quer, responda com um RESUMO curto (itens, tamanhos, adicionais, observações, retirada/entrega e valor) e pergunte "Posso confirmar o pedido?" usando intent "chat". Só use intent "order_confirmed" DEPOIS que o cliente confirmar ("sim", "pode", "confirma", "isso", "ok"). Se ele já disser algo como "pode fechar"/"confirma" junto com o pedido, já é a confirmação. Não repita perguntas.
+- SEJA RÁPIDO: assim que o cliente disser o que quer, FECHE O PEDIDO NA HORA com intent "order_confirmed" e responda com um RESUMO curto do pedido (itens, tamanhos, adicionais, observações, retirada/entrega). NÃO peça confirmação ("posso confirmar?") e não repita perguntas.
 - RETIRADA é o padrão: se o cliente não falar em entrega, use delivery_type "Retirada". NUNCA pergunte se é entrega ou retirada. Ao fechar retirada, informe o endereço da loja com o link do Maps.
-- PAGAMENTO só DEPOIS do pedido confirmado pelo cliente (nunca antes). RETIRADA: NÃO pergunte a forma de pagamento; só trate de pagamento se o próprio cliente falar nisso. ENTREGA: depois que o cliente confirmar o pedido, pergunte uma vez como vai pagar (Pix, dinheiro ou cartão; se dinheiro, o troco) e, quando ele responder, use "order_confirmed" de novo com payment_intent (o sistema atualiza o mesmo pedido). Registre em order.payment_intent o que o cliente DISSE. Dizer a forma de pagamento NÃO é pagar: NUNCA diga que o pagamento foi feito/confirmado.
+- PAGAMENTO só depois do pedido fechado. RETIRADA: NÃO pergunte a forma de pagamento; só trate de pagamento se o próprio cliente falar nisso. ENTREGA: junto com o resumo, pergunte uma vez como vai pagar (Pix, dinheiro ou cartão; se dinheiro, o troco) e, quando ele responder, use "order_confirmed" de novo com payment_intent (o sistema atualiza o mesmo pedido). Dizer a forma de pagamento NÃO é pagar: NUNCA diga que o pagamento foi feito/confirmado.
+- PAGAMENTO EM 2 FORMAS: se o cliente quiser dividir (ex.: "20 no pix e o resto em dinheiro"), preencha order.payments com as 2 partes [{{"method": "Pix", "amount": 20}}, {{"method": "Dinheiro", "amount": RESTO}}] somando o total do pedido, e payment_intent "Pix + Dinheiro". O Pix enviado será só da parte Pix.
 - Se o produto tem tamanhos e o cliente não disse qual, use o tamanho M (ou o primeiro disponível) sem perguntar.
 - ENTREGA (só quando o cliente pedir entrega): se não houver endereço nem localização, peça apenas o endereço ou a localização. Com endereço ou localização, feche o pedido informando a taxa. Se veio só a localização, feche e peça o complemento (número, apto, referência) na mesma mensagem.
 - ALTERAÇÕES: se o cliente mudar, adicionar ou tirar itens, trocar endereço ou complemento depois de fechar, use "order_confirmed" de novo com o pedido COMPLETO e atualizado. O sistema EDITA o mesmo pedido desta conversa (nunca cria outro); diga "pedido atualizado".
 - OBSERVAÇÕES: se o cliente pedir algo especial (ex.: "sem cebola", "molho à parte", "tocar o interfone"), coloque em order.notes.
-- PIX: só depois que o cliente confirmou o pedido. Se ele quiser pagar com Pix ou pedir a chave, use "send_pix": true (o sistema envia o Pix; não escreva a chave) e peça o COMPROVANTE aqui depois de pagar. Se pedirem Pix antes de confirmar, mande o resumo e peça a confirmação primeiro.
+- PIX: se o cliente quiser pagar com Pix ou pedir a chave/código, use "send_pix": true (o sistema envia o código Pix Copia e Cola; o QR Code só se o cliente pedir QR). Não escreva a chave. Peça o COMPROVANTE depois de pagar, a menos que o Pix seja automático (Mercado Pago), aí a confirmação chega sozinha. Se o cliente mandar um comprovante sem ter pedido o Pix, tudo bem: o sistema confere.
 - COMPROVANTES: o sistema confere o comprovante sozinho. Nunca afirme que um pagamento foi recebido.
 - O telefone do cliente já é conhecido pelo WhatsApp: NUNCA pergunte o telefone. Números de casa/rua não são telefone.
 - Só ofereça itens do cardápio acima.
@@ -174,7 +186,7 @@ REGRAS:
 {settings['ai_custom_instructions']}
 Responda SOMENTE com JSON válido:
 {{"reply": "texto para o cliente", "send_pix": false, "send_menu": false, "intent": "chat|order_confirmed|cancel|human", "preferences": ["preferências alimentares detectadas"],
- "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": ["nome"]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_intent": "|Pix|Dinheiro|Cartão Crédito|Cartão Débito", "notes": ""}}}}"""
+ "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": ["nome"]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_intent": "|Pix|Dinheiro|Cartão Crédito|Cartão Débito|Pix + Dinheiro...", "payments": [], "notes": ""}}}}"""
 
 
 REPLY_RE = re.compile(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', re.S)
@@ -248,17 +260,26 @@ async def handle_receipt(input: IncomingMessage, doc: dict, phone: str, to: str,
     if not data.get("is_receipt") or not order or order.get("payment_status") == "pago":
         input.text = f"{input.text} [o cliente enviou {'um PDF' if 'pdf' in input.media_mime else 'uma imagem'}: {data.get('description') or 'não foi possível ler'}]".strip()
         return None
-    paid, note = check_receipt(data, order["total"], settings)
+    if order.get("mp_order_id"):  # automatic Pix: only Mercado Pago can confirm
+        if await confirm_if_paid(order):
+            return await chat_with_order(await db.chats.find_one({"chat_id": doc["chat_id"]}))
+    paid, note = check_receipt(data, pix_amount(order), settings)
     upd = {"payment_status": "pago", "payment_method": "Pix", "receipt_note": note} if paid else {"payment_status": "em_verificacao", "receipt_note": note}
     await db.orders.update_one({"order_id": order["order_id"]}, {"$set": upd})
     text = ("Comprovante conferido ✅ Pagamento do pedido #{id} confirmado. Obrigado!" if paid
             else "Recebi seu comprovante 📎 mas não consegui confirmar automaticamente (valor ou recebedor diferentes). Nossa equipe vai conferir e te avisa já já 🙏").format(id=order["order_id"][-6:].upper())
-    doc = await push_message(doc["chat_id"], "bot", text, {} if paid else {"status": "needs_human"})
+    doc = await push_message(doc["chat_id"], "bot", text, {} if paid else {"status": "needs_human", "is_human_controlled": True})
     await wa_send(to, text)
     return await chat_with_order(doc)
 
 
 async def process_message(input: IncomingMessage, simulated: bool = False) -> Chat:
+    lock = _chat_locks.setdefault(f"{input.phone}", asyncio.Lock())
+    async with lock:
+        return await _process_message(input, simulated)
+
+
+async def _process_message(input: IncomingMessage, simulated: bool = False) -> Chat:
     phone = sanitize_phone(input.phone) or input.phone
     if input.audio_base64 and not has_feature("audio_whatsapp"):
         input.audio_base64 = ""
@@ -286,6 +307,9 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
     doc = await push_message(chat_id, "customer", input.text or ("📎 Arquivo enviado" if input.media_base64 else ""), loc_extra)
     if doc.get("is_human_controlled"):
         return await chat_with_order(doc)
+    pending = await linked_order(doc, phone)
+    if pending and pending.get("mp_order_id") and pending.get("payment_status") != "pago" and await confirm_if_paid(pending):
+        return await chat_with_order(await db.chats.find_one({"chat_id": chat_id}))
 
     settings = await get_settings()
     day = await db.day_status.find_one({}) or {}
@@ -338,12 +362,18 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
         if items:
             dtype = o.get("delivery_type") or "Retirada"
             intent_pay = (o.get("payment_intent") or "").strip()
+            split = [PaymentPart(method=str(p.get("method", "")), amount=float(p.get("amount") or 0)) for p in (o.get("payments") or [])[:2] if p.get("method")]
             open_order = await linked_order(doc, phone)
             updated = bool(open_order)
             if open_order:  # changes EDIT this conversation's order (never a duplicate); payment stays as it is
-                order = await update_order(open_order["order_id"], OrderUpdate(delivery_type=dtype, address=o.get("address") or open_order.get("address", ""), payment_intent=intent_pay or open_order.get("payment_intent", ""), notes=o.get("notes") or open_order.get("notes", ""), items=items, delivery_fee=0.0 if dtype == "Retirada" else None))
+                fee, zone = 0.0, ""
+                addr = o.get("address") or open_order.get("address", "")
+                if dtype == "Entrega":  # e.g. pickup → delivery: charge the zone fee for the address/location
+                    q = await quote_fee_full(zones, settings, open_order.get("latitude") if lat is None else lat, open_order.get("longitude") if lng is None else lng, addr)
+                    fee, zone = q["fee"], q["zone_name"]
+                order = await update_order(open_order["order_id"], OrderUpdate(delivery_type=dtype, address=addr, payment_intent=intent_pay or open_order.get("payment_intent", ""), payments=split or None, notes=o.get("notes") or open_order.get("notes", ""), items=items, delivery_fee=fee, zone_name=zone))
             else:  # saying how you'll pay is NOT paying: payment_method stays Pendente until a receipt is verified
-                order = await create_order_record(OrderCreate(customer_name=doc["customer_name"], customer_phone=phone, delivery_type=dtype, address=o.get("address", ""), payment_method="Pendente", payment_intent=intent_pay, notes=o.get("notes", ""), items=items, latitude=lat, longitude=lng, status="Em Análise", source="whatsapp"))
+                order = await create_order_record(OrderCreate(customer_name=doc["customer_name"], customer_phone=phone, delivery_type=dtype, address=o.get("address", ""), payment_method="Pendente", payment_intent=intent_pay, payments=split, notes=o.get("notes", ""), items=items, latitude=lat, longitude=lng, status="Em Análise", source="whatsapp"))
             if lat is not None:  # remember the customer's GPS point in the CRM for the next deliveries
                 await db.customers.update_one({"phone": phone}, {"$set": {"last_lat": lat, "last_lng": lng}})
             brl = lambda v: f"{v:.2f}".replace(".", ",")
@@ -359,29 +389,43 @@ async def process_message(input: IncomingMessage, simulated: bool = False) -> Ch
     wants_pix = bool(data.get("send_pix")) or (asked_pix and intent != "cancel")
     data["send_pix"] = False
     if wants_pix and open_now and open_now.get("payment_status") != "pago":
-        if settings["pix_key"]:
+        if settings["pix_key"] or settings.get("pix_provider") == "mercadopago":
             data["send_pix"] = True
         else:  # never silent: the customer asked and there is no key to send
             logger.warning("Pix pedido mas loja sem chave Pix configurada")
             reply = f"{reply}\n\nUm atendente já te envia os dados do Pix 🙏"
-            extra = {**extra, "status": "needs_human"}
+            extra = {**extra, "status": "needs_human", "is_human_controlled": True}
     elif wants_pix and not open_now and intent != "order_confirmed":
         reply = f"{reply}\n\nAssim que você confirmar o pedido, eu te mando o Pix 😊"
+    want_qr = bool(re.search(r"\bqr\b|qr ?code|qrcode", said))
+    mp_token = await store_token() if settings.get("pix_provider") == "mercadopago" else ""
+    if data.get("send_pix") and mp_token:
+        data["send_pix"] = False
+        mp = await create_pix(open_now, mp_token, pix_amount(open_now))
+        if mp and mp["qr_code"]:
+            await db.orders.update_one({"order_id": open_now["order_id"]}, {"$set": {"mp_order_id": mp["mp_order_id"], "pix_copia_e_cola": mp["qr_code"]}})
+            pix_code, pix_qr = mp["qr_code"], (f"data:image/png;base64,{mp['qr_code_base64']}" if want_qr and mp["qr_code_base64"] else "")
+            reply = f"{reply}\n\nAssim que o Pix cair, eu confirmo aqui automaticamente ✅"
+        elif not settings["pix_key"]:
+            reply = f"{reply}\n\nUm atendente já te envia os dados do Pix 🙏"
+            extra = {**extra, "status": "needs_human", "is_human_controlled": True}
+        else:
+            data["send_pix"] = True  # Mercado Pago failed: falls back to the static Pix
     if data.get("send_pix") and settings["pix_key"]:
         if settings["pix_mode"] == "brcode" and has_feature("pix_qr"):
-            pix = await gerar_pix(open_now["total"], open_now["order_id"], settings)
+            pix = await gerar_pix(pix_amount(open_now), open_now["order_id"], settings)
             if pix:
-                pix_code, pix_qr = pix["copiaECola"], pix["qrCodeBase64"]
+                pix_code, pix_qr = pix["copiaECola"], (pix["qrCodeBase64"] if want_qr else "")
         if not pix_code:
             pix_key = settings["pix_key"]
-    if (pix_code or pix_key) and "comprovante" not in reply.lower():
+    if (pix_code or pix_key) and not mp_token and "comprovante" not in reply.lower():
         reply = f"{reply}\n\nDepois de pagar, me manda o comprovante aqui (foto ou PDF) 📎"
     menu_images = [{"image": p["image_url"], "caption": f"{p['name']} · R$ {p['price']:.2f}".replace(".", ",")} for p in products if data.get("send_menu") and p.get("active") and p.get("image_url")][:10]
     doc = await push_message(chat_id, "bot", reply, extra)
     if menu_images:
         await push_message(chat_id, "bot", f"📸 {len(menu_images)} foto(s) do cardápio enviadas")
     if pix_code:
-        await push_message(chat_id, "bot", f"QR Code Pix + Pix Copia e Cola: {pix_code}")
+        await push_message(chat_id, "bot", f"{'QR Code + ' if pix_qr else ''}Pix Copia e Cola: {pix_code}")
     elif pix_key:
         await push_message(chat_id, "bot", f"Chave Pix ({settings['pix_key_type']}): {pix_key}")
     await wa_send(to, reply, pix_key, pix_code, pix_qr, menu_images)

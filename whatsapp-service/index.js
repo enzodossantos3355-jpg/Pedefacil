@@ -35,6 +35,11 @@ if (fs.existsSync(`${AUTH_ROOT}/creds.json`)) {
 async function start(storeId, { pairingPhone } = {}) {
   const s = session(storeId);
   if (s.starting) return;
+  // One socket per store: a second socket with the same credentials makes WhatsApp drop the other one,
+  // which looked like "conectado/desconectado" flapping. Pairing a new number replaces the old socket explicitly.
+  if (s.sock && !pairingPhone) return;
+  if (s.sock) { try { s.sock.end(undefined); } catch { /* ignore */ } s.sock = null; }
+  clearTimeout(s.retry);
   s.starting = true;
   s.manualStop = false;
   try {
@@ -52,14 +57,20 @@ async function start(storeId, { pairingPhone } = {}) {
     }
 
     sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+      if (s.sock !== sock) return; // events from an old, replaced socket must not touch the state
       if (qr && !pairingPhone) s.state = { ...s.state, status: "qr_ready", qr_code: await QRCode.toDataURL(qr) };
+      if (connection === "open") s.fails = 0;
       if (connection === "open") s.state = { ...s.state, status: "connected", is_connected: true, qr_code: null, pairing_code: null, phone: jidToPhone(sock.user?.id) };
       if (connection === "close") {
         const code = lastDisconnect?.error?.output?.statusCode;
         s.state = { ...s.state, status: "disconnected", is_connected: false, last_error: lastDisconnect?.error?.message || null };
         s.sock = null;
         if (code === DisconnectReason.loggedOut) fs.rmSync(authDir(storeId), { recursive: true, force: true });
-        else if (!s.manualStop) setTimeout(() => start(storeId).catch(() => {}), 3000); // automatic reconnect
+        else if (!s.manualStop) {
+          // 440 = this session was opened by another server; wait before taking it back instead of fighting every 3s
+          const wait = code === DisconnectReason.connectionReplaced ? 60000 : Math.min(30000, 3000 * 2 ** Math.min(s.fails = (s.fails || 0) + 1, 4));
+          s.retry = setTimeout(() => start(storeId).catch(() => {}), wait);
+        }
       }
     });
 

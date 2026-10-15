@@ -27,6 +27,7 @@ export default function Planos() {
       {plan && <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-stone-600" data-testid="current-plan-info">Plano atual: <Badge className={plan.expired ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-800"}>{plan.plan_name}</Badge>{plan.trial_days_left != null && <span className="flex items-center gap-1 text-amber-700"><Clock size={14} /> {plan.trial_days_left} dia(s) restantes de teste</span>}{plan.expired && <span className="text-red-700">Escolha um plano para voltar a usar o sistema.</span>}</p>}
     </div>
     <div className="grid gap-5 lg:grid-cols-3">
+      <p className="col-span-full rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-900" data-testid="plans-tables-maintenance-note">🛠️ O módulo de <strong>Mesas</strong> está em manutenção e volta em breve. Os demais recursos dos planos funcionam normalmente.</p>
       {(plans.data ?? []).map((p) => { const current = plan?.plan === p.key; const featured = p.key === "padrao"; return <Card key={p.key} className={`relative overflow-hidden shadow-sm ${featured ? "border-[#C5533B] ring-1 ring-[#C5533B]" : "border-stone-200"}`} data-testid={`plan-card-${p.key}`}>
         {featured && <div className="bg-[#C5533B] py-1.5 text-center text-[11px] font-bold uppercase tracking-[0.16em] text-white">Mais escolhido</div>}
         <CardContent className="space-y-5 p-6">

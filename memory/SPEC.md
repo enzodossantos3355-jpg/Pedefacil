@@ -55,3 +55,15 @@ Multi-restaurant SaaS (formerly "Marmita Hub", based on github.com/enzodossantos
 - Bot confirmation flow: AI sends a summary + "Posso confirmar o pedido?" (intent chat, no order yet); order is created only after the customer confirms. Payment only after confirmation: Retirada → never asks payment unless the customer brings it up; Entrega → asks method once after confirmation. Pix blocked in code until the order exists.
 - Courier phone: UI has fixed +55 prefix + mask; backend CourierCreate validator normalizes to 55+DDD+number (12-13 digits), rejects invalid with 422.
 - Pix sending: customer text mentioning pix/chave/QR (not 'paguei') or AI send_pix triggers Pix when a confirmed open order exists; no order → bot says Pix comes after confirmation; no pix_key → 'atendente envia' + needs_human (never silent).
+
+## Update — day, mesas, split payment, Mercado Pago, handoff
+- "Caixa" is now "Novo dia / Fechar dia" (no initial cash). Day closed → POST /orders 409 "Dia fechado…", bot replies closed_message, Pedidos/PDV/Atendimento gated (DayGate).
+- Mesas: in maintenance — /mesas shows Maintenance page, /api/tables* return 503, plans/landing label "Mesas (em manutenção)".
+- Split payment: Order.payments [{method, amount}] (max 2; 2nd = remainder of total). Manual form checkbox "Pagar com 2 formas" → payment_method "Pix + Dinheiro" (paid). AI fills order.payments + payment_intent; Pix is charged only for the Pix part (`pix_amount`).
+- Pix to customer: only "Pix Copia e Cola" code; QR image only if the customer asks "QR".
+- Mercado Pago (Pix Automático, optional): settings.pix_provider manual|mercadopago; token per store in mp_credentials (PUT/GET/DELETE /api/payments/mercadopago, validated with /users/me, never returned). Pix via POST /v1/orders; paid only when GET /v1/orders/{id} is processed/accredited. Confirmation: webhook POST /api/webhooks/mercadopago?store=ID, polling POST /api/payments/mercadopago/check (Pedidos every 20s), GET /api/orders/{id}/payment-status, and on any customer message.
+- Receipts: favorecido name + amount + not scheduled (key not required).
+- Human handoff: "Assumir" sends "👋 Um atendente…" and pauses AI; returning sends "🤖 voltou para a assistente". Any AI→human escalation sets is_human_controlled.
+- Bot: summary without asking confirmation; changes (incl. pickup→delivery with zone fee) edit the same order; per-chat lock prevents duplicates. Status messages sent for all statuses except "Novo", to the chat JID, numbers normalized with 55.
+- Manual order: delivery fee picked from the store's zones (or automatic by address).
+- WhatsApp bridge: one socket per store (no duplicate sockets → no connected/disconnected flapping); 440 waits 60s; backoff. Bundle at whatsapp-service/bundle/bridge.mjs ships to production.

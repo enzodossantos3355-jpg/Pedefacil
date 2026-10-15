@@ -44,7 +44,7 @@ def test_receipt_wrong_recipient_fails_even_with_right_amount():
     }
     ok, note = check_receipt(data, 25.5, SETTINGS)
     assert ok is False
-    assert "recebedor" in note, note
+    assert "favorecido" in note or "recebedor" in note, note
 
 
 def test_receipt_not_completed_fails_even_with_right_amount_and_recipient():

@@ -62,5 +62,9 @@ async def wa_call(method: str, path: str, body: dict | None = None) -> dict:
 async def wa_send(to: str, text: str, pix_key: str = "", pix_code: str = "", pix_qr: str = "", images: list[dict] | None = None) -> bool:
     if not to:
         return False
+    if "@" not in to:  # typed numbers like (77) 98888-7777 need the country code
+        to = "".join(ch for ch in to if ch.isdigit())
+        if len(to) in (10, 11):
+            to = "55" + to
     res = await wa_call("POST", "/send", {"to": to, "text": text, "pix_key": pix_key or None, "pix_code": pix_code or None, "pix_qr": pix_qr or None, "images": images or []})
     return bool(res.get("ok"))

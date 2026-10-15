@@ -6,8 +6,6 @@ import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import type { DayStatus, User, WhatsAppStatus } from "@/lib/types";
 import { formatCurrency } from "@/lib/types";
 import { usePlan } from "@/lib/plans";
@@ -18,13 +16,13 @@ type NavItem = { label: string; path: string; icon: typeof LayoutDashboard; feat
 const navItems: NavItem[] = [
   { label: "Dashboard", path: "/dashboard", icon: LayoutDashboard },
   { label: "Pedidos", path: "/pedidos", icon: ClipboardList },
-  { label: "Mesas", path: "/mesas", icon: Armchair, feature: "mesas", tablesOnly: true },
+  { label: "Mesas (em manutenção)", path: "/mesas", icon: Armchair, feature: "mesas", tablesOnly: true },
   { label: "Atendimento WhatsApp", path: "/atendimento", icon: Headphones, feature: "whatsapp_ia" },
   { label: "Entregadores", path: "/entregadores", icon: Bike, feature: "motoboys" },
   { label: "Clientes Salvos", path: "/clientes", icon: Users },
   { label: "Cardápio", path: "/produtos", icon: UtensilsCrossed },
   { label: "Relatórios", path: "/relatorios", icon: BarChart3 },
-  { label: "Armazenamento & Caixa", path: "/armazenamento", icon: Archive },
+  { label: "Armazenamento", path: "/armazenamento", icon: Archive },
   { label: "Equipe", path: "/equipe", icon: UsersRound },
   { label: "Planos", path: "/planos", icon: Crown },
   { label: "Central de Suporte", path: "/suporte", icon: LifeBuoy },
@@ -39,7 +37,6 @@ export default function AppShell() {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [cashOpen, setCashOpen] = useState(false);
-  const [initialCash, setInitialCash] = useState("0");
   const user = useQuery({ queryKey: ["auth", "me"], queryFn: () => apiGet<User>("/auth/me"), retry: false });
   const day = useQuery({ queryKey: ["day", "status"], queryFn: () => apiGet<DayStatus>("/day/status"), refetchInterval: 15000 });
   const { plan, has } = usePlan();
@@ -47,12 +44,12 @@ export default function AppShell() {
   const dayMutation = useMutation({
     mutationFn: async () => {
       if (day.data?.is_open) return apiPost<DayStatus>("/day/close");
-      return apiPost<DayStatus>("/day/open", { initial_cash: Number(initialCash) || 0 });
+      return apiPost<DayStatus>("/day/open", { initial_cash: 0 });
     },
     onSuccess: (next) => {
       day.refetch();
       setCashOpen(false);
-      toast.success(next.is_open ? "Caixa do dia aberto com sucesso!" : "Caixa do dia fechado e arquivado.");
+      toast.success(next.is_open ? "Novo dia iniciado! Pedidos e IA liberados." : "Dia fechado: tudo arquivado no Armazenamento.");
     },
     onError: () => toast.error("Não foi possível atualizar o caixa."),
   });
@@ -100,14 +97,14 @@ export default function AppShell() {
 
       <div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[84px]" : "lg:pl-72"}`}>
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-[#E7E5E4] bg-white/90 px-4 backdrop-blur sm:px-8" data-testid="app-header">
-          <div className="flex items-center gap-3"><button className="rounded-lg p-2 text-stone-500 hover:bg-stone-100 lg:hidden" onClick={() => setMobileOpen(true)} data-testid="mobile-menu-button" aria-label="Abrir menu"><Menu size={20} /></button><button onClick={() => setCashOpen(true)} className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${isOpen ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-700"}`} data-testid="cash-status-button"><span className={`h-2 w-2 rounded-full ${isOpen ? "bg-emerald-500" : "bg-red-500"}`} />Caixa {isOpen ? "Aberto" : "Fechado"}<span className="hidden font-normal text-stone-500 sm:inline">• {day.data?.total_orders ?? 0} pedidos</span></button><Badge className="hidden border-emerald-200 bg-emerald-50 text-emerald-800 sm:inline-flex" data-testid="assistant-status-badge"><CookingPot size={13} className="mr-1" /> Operação ativa</Badge></div>
+          <div className="flex items-center gap-3"><button className="rounded-lg p-2 text-stone-500 hover:bg-stone-100 lg:hidden" onClick={() => setMobileOpen(true)} data-testid="mobile-menu-button" aria-label="Abrir menu"><Menu size={20} /></button><button onClick={() => setCashOpen(true)} className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${isOpen ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-700"}`} data-testid="cash-status-button"><span className={`h-2 w-2 rounded-full ${isOpen ? "bg-emerald-500" : "bg-red-500"}`} />Dia {isOpen ? "aberto" : "fechado"}<span className="hidden font-normal text-stone-500 sm:inline">• {day.data?.total_orders ?? 0} pedidos</span></button><Badge className="hidden border-emerald-200 bg-emerald-50 text-emerald-800 sm:inline-flex" data-testid="assistant-status-badge"><CookingPot size={13} className="mr-1" /> Operação ativa</Badge></div>
           <div className="flex items-center gap-3"><NotificationBell /><div className="hidden items-center gap-2 border-l border-stone-200 pl-3 sm:flex"><span className="text-right"><strong className="block text-xs">{displayUser.name}</strong><small className="block text-[10px] text-stone-500">{displayUser.role === "admin" ? "Administrador" : "Atendente"}</small></span><CircleUserRound size={21} className="text-stone-400" /></div></div>
         </header>
         {plan?.plan === "trial" && <Link to="/planos" className="flex items-center justify-center gap-2 bg-amber-100 px-4 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-200" data-testid="trial-banner"><Crown size={14} /> Teste grátis: {plan.trial_days_left} dia(s) restantes · funções limitadas · Conheça os planos</Link>}
         <main className="mx-auto w-full max-w-[1440px] p-4 sm:p-6 lg:p-8" data-testid="main-content"><Outlet /></main>
       </div>
 
-      <Dialog open={cashOpen} onOpenChange={setCashOpen}><DialogContent className="border-stone-200 bg-[#F9F8F6]" data-testid="cash-dialog"><DialogHeader><DialogTitle>{isOpen ? "Controle do Caixa do Dia" : "Abertura do Caixa do Dia"}</DialogTitle></DialogHeader>{isOpen ? <div className="space-y-4"><div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"><strong className="block text-emerald-950">🟢 Caixa Aberto</strong><span className="text-sm text-emerald-800">{day.data?.total_orders ?? 0} pedidos registrados • {formatCurrency(day.data?.revenue ?? 0)}</span></div><p className="text-sm text-stone-600">Ao fechar, o período atual será arquivado e novas comandas ficam pausadas até a abertura.</p><DialogFooter><Button variant="outline" onClick={() => setCashOpen(false)} data-testid="cash-dialog-cancel-button">Voltar</Button><Button variant="destructive" onClick={() => dayMutation.mutate()} data-testid="cash-close-button">Fechar Caixa & Finalizar Dia</Button></DialogFooter></div> : <div className="space-y-4"><div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Abra o caixa para liberar pedidos no balcão e acompanhar a operação.</div><div><Label htmlFor="initial-cash">Fundo de troco (R$)</Label><Input id="initial-cash" type="number" min="0" value={initialCash} onChange={(event) => setInitialCash(event.target.value)} className="mt-1 bg-white" data-testid="initial-cash-input" /></div><DialogFooter><Button variant="outline" onClick={() => setCashOpen(false)} data-testid="cash-open-cancel-button">Cancelar</Button><Button onClick={() => dayMutation.mutate()} data-testid="cash-open-button">Abrir Caixa Agora</Button></DialogFooter></div>}</DialogContent></Dialog>
+      <Dialog open={cashOpen} onOpenChange={setCashOpen}><DialogContent className="border-stone-200 bg-[#F9F8F6]" data-testid="cash-dialog"><DialogHeader><DialogTitle>{isOpen ? "Fechar o dia" : "Começar novo dia"}</DialogTitle></DialogHeader>{isOpen ? <div className="space-y-4"><div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"><strong className="block text-emerald-950">🟢 Dia aberto</strong><span className="text-sm text-emerald-800">{day.data?.total_orders ?? 0} pedidos registrados • {formatCurrency(day.data?.revenue ?? 0)}</span></div><p className="text-sm text-stone-600">Ao fechar o dia, pedidos, saldos dos entregadores e conversas vão para o Armazenamento. Pedidos e a IA do WhatsApp ficam desativados até você começar um novo dia.</p><DialogFooter><Button variant="outline" onClick={() => setCashOpen(false)} data-testid="cash-dialog-cancel-button">Voltar</Button><Button variant="destructive" onClick={() => dayMutation.mutate()} data-testid="cash-close-button">Fechar dia</Button></DialogFooter></div> : <div className="space-y-4"><div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Com o dia fechado não é possível criar pedidos e a IA do WhatsApp fica desativada. Comece um novo dia para operar.</div><DialogFooter><Button variant="outline" onClick={() => setCashOpen(false)} data-testid="cash-open-cancel-button">Cancelar</Button><Button onClick={() => dayMutation.mutate()} data-testid="cash-open-button">Começar novo dia</Button></DialogFooter></div>}</DialogContent></Dialog>
     </div>
   );
 }

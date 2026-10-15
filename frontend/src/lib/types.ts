@@ -129,6 +129,8 @@ export interface Order {
   payment_intent: string;
   payment_status: "pendente" | "em_verificacao" | "pago";
   receipt_note: string;
+  mp_order_id: string;
+  payments: PaymentPart[];
   created_at: string;
 }
 
@@ -186,6 +188,7 @@ export interface StoreSettings {
   pix_beneficiary: string;
   pix_mode: "chave" | "brcode";
   pix_city: string;
+  pix_provider: "manual" | "mercadopago";
   tables_enabled: boolean;
   high_demand_message: string;
   ai_custom_instructions: string;
@@ -330,4 +333,15 @@ export interface DayClose {
 
 export interface DayCloseDetail extends DayClose {
   orders: Order[];
+}
+
+export interface MercadoPagoStatus {
+  configured: boolean;
+  account: string;
+  store_id: string;
+}
+
+export interface PaymentPart {
+  method: string;
+  amount: number;
 }

@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, APIRouter
+from fastapi import HTTPException, FastAPI, APIRouter
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 import os
@@ -42,17 +42,24 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # Create a router with the /api prefix
+from routers.mercadopago import public_router as mp_public_router, router as mp_router
 api_router = APIRouter(prefix="/api")
 api_router.include_router(auth_router)
 api_router.include_router(support_router)  # store user / master per route
 api_router.include_router(billing_router)  # own per-route auth (store user / master / Stripe webhook)
 api_router.include_router(whatsapp_internal_router)  # bridge → backend, internal token
 api_router.include_router(wa_bridge.proxy_router)  # replica → WhatsApp leader replica, internal token
+async def tables_maintenance():
+    raise HTTPException(status_code=503, detail="O sistema de mesas está em manutenção e volta em breve.")
+
+
 STORE = [Depends(active_store)]  # session → store (tenant) → plan in force
 api_router.include_router(operations_router, dependencies=STORE)
 api_router.include_router(whatsapp_open_router, dependencies=STORE)
 api_router.include_router(whatsapp_router, dependencies=[*STORE, need("whatsapp_ia")])
-api_router.include_router(tables_router, dependencies=[*STORE, need("mesas")])
+api_router.include_router(tables_router, dependencies=[*STORE, Depends(tables_maintenance)])
+api_router.include_router(mp_public_router)  # Mercado Pago webhook (re-checks with the store's own token)
+api_router.include_router(mp_router, dependencies=STORE)
 
 # Add your routes to the router instead of directly to app
 @api_router.get("/")
