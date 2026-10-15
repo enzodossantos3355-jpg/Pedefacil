@@ -2,7 +2,7 @@
 
 Production runs only uvicorn (no supervisor program for the bridge, no Node in the image), so the backend:
   1. restores every store's Baileys session files from Mongo (`wa_auth`): no QR re-scan after redeploys,
-  2. starts the bundled bridge (whatsapp-service/bundle/bridge.mjs) with the Node runtime shipped via pip
+  2. starts the bundled bridge (backend/whatsapp_bridge/bridge.mjs) with the Node runtime shipped via pip
      (nodejs-wheel-binaries) and restarts it if it dies,
   3. backs the session files up to Mongo every few seconds.
 Production runs several replicas, but WhatsApp allows one live socket per session: two bridges with the same
@@ -30,8 +30,12 @@ from pymongo.errors import DuplicateKeyError
 from lib.db import raw_db
 
 logger = logging.getLogger(__name__)
-BRIDGE = Path(__file__).resolve().parents[2] / "whatsapp-service" / "bundle" / "bridge.mjs"
-AUTH_DIR = Path(os.environ.get("WHATSAPP_AUTH_DIR") or (Path(__file__).resolve().parents[2] / "whatsapp-service" / "auth"))
+# The bundled bridge lives INSIDE backend/ because the published image only ships backend/ and frontend/
+# (whatsapp-service/ is not deployed). Rebuild it with `cd whatsapp-service && yarn bundle`.
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+BRIDGE = BACKEND_DIR / "whatsapp_bridge" / "bridge.mjs"
+_DEV_AUTH = BACKEND_DIR.parent / "whatsapp-service" / "auth"  # preview: supervisor's bridge uses this folder
+AUTH_DIR = Path(os.environ.get("WHATSAPP_AUTH_DIR") or (_DEV_AUTH if _DEV_AUTH.parent.exists() else BACKEND_DIR / "whatsapp_bridge" / "auth"))
 BACKUP_EVERY = 15
 LOCAL_URL = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:8002")
 LEASE = 20  # seconds a leader keeps the bridge without renewing
