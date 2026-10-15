@@ -11,7 +11,7 @@ function openPrint(title: string, body: string) {
 }
 
 const itemsHtml = (o: Order) =>
-  o.items.map((i) => `<div class="r"><span>${i.quantity}x ${esc(i.name)}${i.size ? ` (${esc(i.size)})` : ""}</span><span>${formatCurrency(i.price * i.quantity)}</span></div>${i.additionals.map((a) => `<div>&nbsp;&nbsp;+ ${esc(a.name)}</div>`).join("")}`).join("");
+  o.items.map((i) => `<div class="r"><span>${i.quantity}x ${esc(i.name)}${i.size ? ` (${esc(i.size)})` : ""}</span><span>${formatCurrency(i.price * i.quantity)}</span></div>${i.additionals.map((a) => `<div>&nbsp;&nbsp;+ ${(a.quantity ?? 1) > 1 ? `${a.quantity}x ` : ""}${esc(a.name)}</div>`).join("")}`).join("");
 
 export function printKitchenTicket(o: Order) {
   openPrint(`Comanda ${o.order_id}`, `<h1>COMANDA #${o.order_id.slice(-6).toUpperCase()}</h1><div>${new Date(o.created_at).toLocaleString("pt-BR")}</div><div class="b">${esc(o.customer_name)} • ${esc(o.delivery_type)}</div><hr/>${itemsHtml(o)}<hr/>${o.notes ? `<div class="b">OBS: ${esc(o.notes)}</div>` : ""}<div class="r b"><span>TOTAL</span><span>${formatCurrency(o.total)}</span></div>`);

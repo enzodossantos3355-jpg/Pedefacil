@@ -109,6 +109,7 @@ class Additional(BaseModel):
     name: str
     price: float = 0
     aliases: list[str] = []  # how customers usually call it ("ovinho", "ovo frito")
+    quantity: int = Field(default=1, ge=1)  # units of this add-on per item (e.g. 2× ovo)
 
 
 class ProductSize(BaseModel):

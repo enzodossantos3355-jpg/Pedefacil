@@ -88,6 +88,7 @@ export interface Additional {
   name: string;
   price: number;
   aliases: string[];
+  quantity?: number;
 }
 
 export interface ProductSize {

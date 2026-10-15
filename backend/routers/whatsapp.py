@@ -170,6 +170,7 @@ REGRAS:
 - Só quando o cliente pedir o cardápio ("cardápio", "o que tem hoje", "menu"): liste os pratos ativos com preço, tamanhos e adicionais de forma enxuta e use "send_menu": true (o sistema envia as fotos dos pratos).
 - SEJA RÁPIDO: assim que o cliente disser o que quer, FECHE O PEDIDO NA HORA com intent "order_confirmed" e responda com um RESUMO curto do pedido (itens, tamanhos, adicionais, observações, retirada/entrega). NÃO peça confirmação ("posso confirmar?") e não repita perguntas.
 - RETIRADA é o padrão: se o cliente não falar em entrega, use delivery_type "Retirada". NUNCA pergunte se é entrega ou retirada. Ao fechar retirada, informe o endereço da loja com o link do Maps.
+- ADICIONAIS podem ter mais de 1 unidade (ex.: "com 2 ovos", "bacon duplo"): use additionals [{{"name": "Ovo", "quantity": 2}}].
 - PAGAMENTO só depois do pedido fechado. RETIRADA: NÃO pergunte a forma de pagamento; só trate de pagamento se o próprio cliente falar nisso. ENTREGA: junto com o resumo, pergunte uma vez como vai pagar (Pix, dinheiro ou cartão; se dinheiro, o troco) e, quando ele responder, use "order_confirmed" de novo com payment_intent (o sistema atualiza o mesmo pedido). Dizer a forma de pagamento NÃO é pagar: NUNCA diga que o pagamento foi feito/confirmado.
 - PAGAMENTO EM 2 FORMAS: se o cliente quiser dividir (ex.: "20 no pix e o resto em dinheiro"), preencha order.payments com as 2 partes [{{"method": "Pix", "amount": 20}}, {{"method": "Dinheiro", "amount": RESTO}}] somando o total do pedido, e payment_intent "Pix + Dinheiro". O Pix enviado será só da parte Pix.
 - Se o produto tem tamanhos e o cliente não disse qual, use o tamanho M (ou o primeiro disponível) sem perguntar.
@@ -186,7 +187,7 @@ REGRAS:
 {settings['ai_custom_instructions']}
 Responda SOMENTE com JSON válido:
 {{"reply": "texto para o cliente", "send_pix": false, "send_menu": false, "intent": "chat|order_confirmed|cancel|human", "preferences": ["preferências alimentares detectadas"],
- "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": ["nome"]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_intent": "|Pix|Dinheiro|Cartão Crédito|Cartão Débito|Pix + Dinheiro...", "payments": [], "notes": ""}}}}"""
+ "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": [{{"name": "nome", "quantity": 1}}]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_intent": "|Pix|Dinheiro|Cartão Crédito|Cartão Débito|Pix + Dinheiro...", "payments": [], "notes": ""}}}}"""
 
 
 REPLY_RE = re.compile(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', re.S)
@@ -230,9 +231,19 @@ def price_items(raw_items: list[dict], products: dict[str, dict]) -> list[OrderI
         if not p:
             continue
         size = next((s for s in p.get("sizes", []) if s["name"].lower() == str(it.get("size", "")).lower()), None)
-        wanted = [str(x).lower().strip() for x in it.get("additionals", [])]
-        adds = [a for a in p.get("additionals", []) if any(w in [a["name"].lower(), *[al.lower() for al in a.get("aliases", [])]] for w in wanted)]
-        unit = (size["price"] if size else p["price"]) + sum(a["price"] for a in adds)
+        counts: dict[str, int] = {}
+        for x in it.get("additionals", []):  # "ovo" | "2x ovo" | {"name": "ovo", "quantity": 2}; repeated names add up
+            if isinstance(x, dict):
+                name, n = str(x.get("name", "")), int(x.get("quantity") or 1)
+            else:
+                m = re.match(r"\s*(\d+)\s*[x×]?\s*(.+)", str(x))
+                name, n = (m.group(2), int(m.group(1))) if m else (str(x), 1)
+            w = name.lower().strip()
+            a = next((a for a in p.get("additionals", []) if w in [a["name"].lower(), *[al.lower() for al in a.get("aliases", [])]]), None)
+            if a:
+                counts[a["name"]] = counts.get(a["name"], 0) + max(1, n)
+        adds = [{**a, "quantity": counts[a["name"]]} for a in p.get("additionals", []) if a["name"] in counts]
+        unit = (size["price"] if size else p["price"]) + sum(a["price"] * a["quantity"] for a in adds)
         items.append(OrderItem(product_id=p["product_id"], name=p["name"], price=unit, quantity=max(1, int(it.get("quantity", 1))), size=size["name"] if size else "", additionals=adds))
     return items
 
