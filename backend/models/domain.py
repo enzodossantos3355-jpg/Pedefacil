@@ -517,8 +517,15 @@ class CourierEarning(BaseModel):
     fees: float
 
 
+class ReportLine(BaseModel):
+    label: str
+    count: int
+    total: float
+
+
 class DayClose(BaseModel):
     close_id: str
+    opened_at: datetime | None = None
     created_at: datetime
     revenue: float = 0
     total_orders: int = 0
@@ -528,7 +535,11 @@ class DayClose(BaseModel):
 
 
 class DayCloseDetail(DayClose):
+    """What is stored for a closed day: every order + totals by type, payment method and product."""
     orders: list[Order] = []
+    by_type: list[ReportLine] = []
+    by_payment: list[ReportLine] = []
+    top_products: list[ReportLine] = []
 
 
 class MercadoPagoToken(BaseModel):

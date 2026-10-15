@@ -19,7 +19,7 @@ from lib.tastes import all_profiles
 from models.domain import (
     LEGACY_STATUS, STATUS_FLOW, Courier, CourierCreate, Customer, CustomerCreate, DashboardSummary, DayOpenRequest, DayStatus,
     DeliveryZone, DeliveryZoneCreate, FeeQuote, FeeQuoteResult, Order, OrderCreate, OrderUpdate, Product,
-    AppNotification, CourierEarning, DayClose, DayCloseDetail, PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
+    AppNotification, CourierEarning, DayClose, DayCloseDetail, ReportLine, PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
 )
 import os
 
@@ -453,7 +453,8 @@ async def close_day():
     current = await db.orders.find({"archived": {"$ne": True}}).to_list(5000)
     earnings = await courier_earnings([Order(**o) for o in current])
     chats_deleted = (await db.chats.delete_many({})).deleted_count
-    await db.day_closes.insert_one({"close_id": close_id, "created_at": datetime.now(timezone.utc), "revenue": s.revenue, "total_orders": s.total_orders, "avg_ticket": s.revenue / s.total_orders if s.total_orders else 0,
+    opened = (await db.day_status.find_one({}) or {}).get("opened_at")
+    await db.day_closes.insert_one({"close_id": close_id, "opened_at": opened, "created_at": datetime.now(timezone.utc), "revenue": s.revenue, "total_orders": s.total_orders, "avg_ticket": s.revenue / s.total_orders if s.total_orders else 0,
                                     "couriers": [e.model_dump() for e in earnings], "chats_deleted": chats_deleted})
     await db.orders.update_many({"archived": {"$ne": True}}, {"$set": {"archived": True, "close_id": close_id}})
     await db.couriers.update_many({}, {"$set": {"working_date": ""}})  # pick who works again on the next day
@@ -472,7 +473,34 @@ async def close_detail(close_id: str):
     if not d:
         raise HTTPException(status_code=404, detail="Fechamento não encontrado.")
     orders = [Order(**o) for o in await db.orders.find({"close_id": close_id}).sort("created_at", -1).to_list(5000)]
-    return DayCloseDetail(**d, orders=orders)
+    valid = [o for o in orders if o.status != "Cancelado"]
+
+    def group(pairs: list[tuple[str, int, float]]) -> list[ReportLine]:
+        acc: dict[str, list[float]] = {}
+        for label, n, total in pairs:
+            a = acc.setdefault(label, [0, 0.0])
+            a[0] += n
+            a[1] += total
+        return sorted((ReportLine(label=k, count=int(v[0]), total=round(v[1], 2)) for k, v in acc.items()), key=lambda r: r.total, reverse=True)
+
+    pay: list[tuple[str, int, float]] = []
+    for o in valid:  # split payments count each part in its own method
+        pay += [(p.method, 1, p.amount) for p in o.payments] if o.payments else [(o.payment_method or "Pendente", 1, o.total)]
+    if not d.get("opened_at") and orders:
+        d["opened_at"] = min(o.created_at for o in orders)
+    return DayCloseDetail(**d, orders=orders,
+                          by_type=group([(o.delivery_type, 1, o.total) for o in valid]),
+                          by_payment=group(pay),
+                          top_products=group([(i.name, i.quantity, i.price * i.quantity) for o in valid for i in o.items])[:10])
+
+
+@router.delete("/day/closes/{close_id}")
+async def delete_close(close_id: str):
+    """Deletes a closed day from Armazenamento with its archived orders (customers and reports of other days stay)."""
+    if not (await db.day_closes.delete_one({"close_id": close_id})).deleted_count:
+        raise HTTPException(status_code=404, detail="Fechamento não encontrado.")
+    removed = (await db.orders.delete_many({"close_id": close_id, "archived": True})).deleted_count
+    return {"ok": True, "orders_removed": removed}
 
 
 @router.get("/reports/summary", response_model=ReportSummary)

@@ -67,3 +67,4 @@ Multi-restaurant SaaS (formerly "Marmita Hub", based on github.com/enzodossantos
 - Bot: summary without asking confirmation; changes (incl. pickup→delivery with zone fee) edit the same order; per-chat lock prevents duplicates. Status messages sent for all statuses except "Novo", to the chat JID, numbers normalized with 55.
 - Manual order: delivery fee picked from the store's zones (or automatic by address).
 - WhatsApp bridge: one socket per store (no duplicate sockets → no connected/disconnected flapping); 440 waits 60s; backoff. Bundle at whatsapp-service/bundle/bridge.mjs ships to production.
+- Armazenamento: 'Dias fechados' list (ClosedDays) → 'Relatório do dia' (GET /api/day/closes/{id}: opened_at→closed, revenue, by_type Entrega/Retirada, by_payment (split parts counted per method), couriers, top_products, orders). DELETE /api/day/closes/{id} removes the record + its archived orders (customers kept).

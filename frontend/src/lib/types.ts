@@ -321,8 +321,15 @@ export interface CourierEarning {
   fees: number;
 }
 
+export interface ReportLine {
+  label: string;
+  count: number;
+  total: number;
+}
+
 export interface DayClose {
   close_id: string;
+  opened_at: string | null;
   created_at: string;
   revenue: number;
   total_orders: number;
@@ -333,6 +340,9 @@ export interface DayClose {
 
 export interface DayCloseDetail extends DayClose {
   orders: Order[];
+  by_type: ReportLine[];
+  by_payment: ReportLine[];
+  top_products: ReportLine[];
 }
 
 export interface MercadoPagoStatus {
