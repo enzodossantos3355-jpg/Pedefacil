@@ -1,5 +1,6 @@
 """LLM helpers (Claude Sonnet 5.5 via the Emergent universal key) + WhatsApp bridge client."""
 
+import asyncio
 import json
 import logging
 import os
@@ -47,15 +48,16 @@ WA_HEADERS = {"x-internal-token": os.environ.get("WHATSAPP_INTERNAL_TOKEN", "")}
 
 
 async def wa_call(method: str, path: str, body: dict | None = None) -> dict:
-    """Each store has its own WhatsApp session in the bridge, selected by the x-store-id header."""
+    """Each store has its own WhatsApp session in the bridge, selected by the x-store-id header.
+    Async client, so a slow bridge only delays this request, never the event loop; /status is polled, so it gives up sooner."""
     from lib.tenant import current_store
     from lib.wa_bridge import bridge_url  # another replica may be running the bridge
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=8 if path == "/status" else 20) as client:
             res = await client.request(method, f"{bridge_url()}{path}", json=body, headers={**WA_HEADERS, "x-store-id": current_store.get()})
             return res.json() if res.content else {}
     except Exception as exc:  # bridge offline must never break the panel
-        logger.warning("whatsapp bridge %s %s: %s", method, path, exc)
+        logger.warning("whatsapp bridge %s %s: %s: %s", method, path, type(exc).__name__, exc)  # a timeout has an empty message
         return {"status": "offline", "is_connected": False, "detail": "Serviço do WhatsApp indisponível"}
 
 
@@ -66,5 +68,11 @@ async def wa_send(to: str, text: str, pix_key: str = "", pix_code: str = "", pix
         to = "".join(ch for ch in to if ch.isdigit())
         if len(to) in (10, 11):
             to = "55" + to
-    res = await wa_call("POST", "/send", {"to": to, "text": text, "pix_key": pix_key or None, "pix_code": pix_code or None, "pix_qr": pix_qr or None, "images": images or []})
-    return bool(res.get("ok"))
+    body = {"to": to, "text": text, "pix_key": pix_key or None, "pix_code": pix_code or None, "pix_qr": pix_qr or None, "images": images or []}
+    for attempt in range(3):  # every chat message must reach the customer: retry through short reconnects
+        res = await wa_call("POST", "/send", body)
+        if res.get("ok"):
+            return True
+        await asyncio.sleep(4 * (attempt + 1))
+    logger.warning("WhatsApp: mensagem não enviada para %s", to)
+    return False

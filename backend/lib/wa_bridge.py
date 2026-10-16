@@ -36,7 +36,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 BRIDGE = BACKEND_DIR / "whatsapp_bridge" / "bridge.mjs"
 _DEV_AUTH = BACKEND_DIR.parent / "whatsapp-service" / "auth"  # preview: supervisor's bridge uses this folder
 AUTH_DIR = Path(os.environ.get("WHATSAPP_AUTH_DIR") or (_DEV_AUTH if _DEV_AUTH.parent.exists() else BACKEND_DIR / "whatsapp_bridge" / "auth"))
-BACKUP_EVERY = 15
+BACKUP_EVERY = 5
 LOCAL_URL = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:8002")
 LEASE = 20  # seconds a leader keeps the bridge without renewing
 TICK = 5  # lease renewal / leader lookup interval
@@ -94,28 +94,48 @@ async def restore_sessions(root: Path) -> int:
     return count
 
 
+async def backup_once(root: Path, seen: dict[str, float]) -> None:
+    present: set[tuple[str, str]] = set()
+    for path in root.glob("*/*.json"):
+        store_id, name = path.parent.name, path.name
+        present.add((store_id, name))
+        mtime = path.stat().st_mtime
+        key = f"{store_id}/{name}"
+        if seen.get(key) != mtime:
+            await raw_db.wa_auth.update_one({"store_id": store_id, "file": name}, {"$set": {"content": path.read_text(encoding="utf-8")}}, upsert=True)
+            seen[key] = mtime
+    # a store that logged out (folder removed by the bridge) loses its saved session too
+    stores_on_disk = {s for s, _ in present}
+    async for doc in raw_db.wa_auth.find({}, {"store_id": 1, "file": 1}):
+        if doc["store_id"] not in stores_on_disk or (doc["store_id"], doc["file"]) not in present:
+            await raw_db.wa_auth.delete_one({"_id": doc["_id"]})
+            seen.pop(f"{doc['store_id']}/{doc['file']}", None)
+
+
 async def backup_loop(root: Path) -> None:
     seen: dict[str, float] = {}
-    while True:
+    try:
+        while True:
+            try:
+                await backup_once(root, seen)
+            except Exception as exc:
+                logger.warning("whatsapp session backup: %s", exc)
+            await asyncio.sleep(BACKUP_EVERY)
+    except asyncio.CancelledError:  # shutdown: save what the bridge wrote since the last pass, or a fresh pairing would need a new scan
         try:
-            present: set[tuple[str, str]] = set()
-            for path in root.glob("*/*.json"):
-                store_id, name = path.parent.name, path.name
-                present.add((store_id, name))
-                mtime = path.stat().st_mtime
-                key = f"{store_id}/{name}"
-                if seen.get(key) != mtime:
-                    await raw_db.wa_auth.update_one({"store_id": store_id, "file": name}, {"$set": {"content": path.read_text(encoding="utf-8")}}, upsert=True)
-                    seen[key] = mtime
-            # a store that logged out (folder removed by the bridge) loses its saved session too
-            stores_on_disk = {s for s, _ in present}
-            async for doc in raw_db.wa_auth.find({}, {"store_id": 1, "file": 1}):
-                if doc["store_id"] not in stores_on_disk or (doc["store_id"], doc["file"]) not in present:
-                    await raw_db.wa_auth.delete_one({"_id": doc["_id"]})
-                    seen.pop(f"{doc['store_id']}/{doc['file']}", None)
+            await asyncio.shield(backup_once(root, seen))
         except Exception as exc:
-            logger.warning("whatsapp session backup: %s", exc)
-        await asyncio.sleep(BACKUP_EVERY)
+            logger.warning("whatsapp final session backup: %s", exc)
+        raise
+
+
+def _die_with_parent() -> None:
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, 9)  # PR_SET_PDEATHSIG, SIGKILL (Linux only)
+    except Exception:
+        pass
 
 
 async def run_bridge(root: Path) -> None:
@@ -125,7 +145,9 @@ async def run_bridge(root: Path) -> None:
     proc = None
     while True:
         try:
-            proc = await asyncio.create_subprocess_exec(node_binary(), str(BRIDGE), env=env, cwd=str(BRIDGE.parent))
+            # preexec: if the backend is killed without cleanup (SIGKILL/OOM) the kernel kills the bridge too, so it can't linger
+            # as a second live socket next to the next leader's bridge
+            proc = await asyncio.create_subprocess_exec(node_binary(), str(BRIDGE), env=env, cwd=str(BRIDGE.parent), preexec_fn=_die_with_parent)
             logger.info("whatsapp bridge started (pid %s, port %s)", proc.pid, port)
             code = await proc.wait()
             logger.warning("whatsapp bridge exited with %s, restarting", code)
@@ -206,7 +228,9 @@ async def start() -> list[asyncio.Task]:
     _state["embedded"] = embedded()
     if _state["embedded"]:
         return [asyncio.create_task(leader_loop(root))]
-    return [asyncio.create_task(backup_loop(root))]
+    # Preview: NO session backup to Mongo. If the preview and the published app shared the same WhatsApp
+    # credentials they would keep replacing each other ("conflict: replaced" → device_removed). Only production saves/restores.
+    return []
 
 
 proxy_router = APIRouter(tags=["whatsapp"])  # replica → leader replica, internal token

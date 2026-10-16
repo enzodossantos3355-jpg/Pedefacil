@@ -173787,11 +173787,11 @@ async function start(storeId, { pairingPhone } = {}) {
       if (connection === "open") s.state = { ...s.state, status: "connected", is_connected: true, qr_code: null, pairing_code: null, phone: jidToPhone(sock.user?.id) };
       if (connection === "close") {
         const code = lastDisconnect?.error?.output?.statusCode;
-        s.state = { ...s.state, status: "disconnected", is_connected: false, last_error: lastDisconnect?.error?.message || null };
+        s.state = { ...s.state, status: "disconnected", is_connected: false, qr_code: null, last_error: lastDisconnect?.error?.message || null };
         s.sock = null;
         if (code === DisconnectReason.loggedOut) fs5.rmSync(authDir(storeId), { recursive: true, force: true });
         else if (!s.manualStop) {
-          const wait = code === DisconnectReason.connectionReplaced ? 6e4 : Math.min(3e4, 3e3 * 2 ** Math.min(s.fails = (s.fails || 0) + 1, 4));
+          const wait = code === DisconnectReason.restartRequired ? 0 : code === DisconnectReason.connectionReplaced ? 6e4 : Math.min(3e4, 3e3 * 2 ** Math.min(s.fails = (s.fails || 0) + 1, 4));
           s.retry = setTimeout(() => start(storeId).catch(() => {
           }), wait);
         }
