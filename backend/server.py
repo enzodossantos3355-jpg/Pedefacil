@@ -48,7 +48,6 @@ api_router.include_router(auth_router)
 api_router.include_router(support_router)  # store user / master per route
 api_router.include_router(billing_router)  # own per-route auth (store user / master / Stripe webhook)
 api_router.include_router(whatsapp_internal_router)  # bridge → backend, internal token
-api_router.include_router(wa_bridge.proxy_router)  # replica → WhatsApp leader replica, internal token
 async def tables_maintenance():
     raise HTTPException(status_code=503, detail="O sistema de mesas está em manutenção e volta em breve.")
 

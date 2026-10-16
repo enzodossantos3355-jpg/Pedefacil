@@ -7,8 +7,9 @@ Production runs only uvicorn (no supervisor program for the bridge, no Node in t
   3. backs the session files up to Mongo every few seconds.
 Production runs several replicas, but WhatsApp allows one live socket per session: two bridges with the same
 credentials keep replacing each other (constant disconnects). So replicas elect one leader through a lease in
-Mongo (`wa_leader`); only the leader runs the bridge and the backup, and the others forward their bridge calls
-to the leader's /api/wa-bridge proxy.
+Mongo (`wa_leader`); only the leader runs the bridge and the backup. The other replicas queue their bridge calls
+in Mongo (`wa_rpc`) and the leader runs them on its local bridge and writes the reply back. (Direct pod-to-pod HTTP
+to the leader's IP failed in production, so the panel flapped online/offline and some messages never went out.)
 In the preview, supervisor already runs the bridge (program "whatsapp"), so only the backup loop runs.
 """
 
@@ -20,11 +21,12 @@ import shutil
 import socket
 import tempfile
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Response
 from pymongo.errors import DuplicateKeyError
 
 from lib.db import raw_db
@@ -40,7 +42,7 @@ BACKUP_EVERY = 5
 LOCAL_URL = os.environ.get("WHATSAPP_SERVICE_URL", "http://localhost:8002")
 LEASE = 20  # seconds a leader keeps the bridge without renewing
 TICK = 5  # lease renewal / leader lookup interval
-PROXY_PORT = os.environ.get("WHATSAPP_PROXY_PORT", "8080")  # pod's nginx, which serves /api
+RPC_POLL = 0.25  # seconds between queue checks (leader) and reply checks (caller)
 ME = socket.gethostname()
 _state: dict = {"embedded": False, "holder": None, "addr": None}
 
@@ -66,12 +68,65 @@ def my_addr() -> str:
         return ""
 
 
-def bridge_url() -> str:
-    """Base URL for bridge calls: the local bridge, or the leader replica's proxy when another pod leads."""
-    holder, addr = _state["holder"], _state["addr"]
-    if not _state["embedded"] or not holder or holder == ME or not addr:
-        return LOCAL_URL
-    return f"http://{addr}:{PROXY_PORT}/api/wa-bridge"
+def forward_to_leader() -> bool:
+    """True when another replica runs the bridge, so calls must go through the Mongo queue."""
+    holder = _state["holder"]
+    return _state["embedded"] and bool(holder) and holder != ME
+
+
+async def rpc_call(method: str, path: str, body: dict | None, store_id: str, timeout: float) -> dict:
+    """Queue one bridge call for the leader replica and wait for its reply."""
+    rid = uuid.uuid4().hex
+    await raw_db.wa_rpc.insert_one({"_id": rid, "state": "pending", "method": method, "path": path, "body": body, "store_id": store_id,
+                                    "expires_at": time.time() + timeout, "created_at": datetime.now(timezone.utc)})
+    deadline = time.monotonic() + timeout
+    while True:
+        await asyncio.sleep(RPC_POLL)
+        doc = await raw_db.wa_rpc.find_one({"_id": rid}, {"state": 1, "result": 1})
+        if doc and doc["state"] == "done":
+            await raw_db.wa_rpc.delete_one({"_id": rid})
+            return doc.get("result") or {}
+        if time.monotonic() >= deadline:
+            # still pending: withdraw it so a late leader cannot run it after the caller gave up (no duplicate sends on retry)
+            if (await raw_db.wa_rpc.delete_one({"_id": rid, "state": "pending"})).deleted_count:
+                raise TimeoutError(f"no WhatsApp leader answered {method} {path} (leader: {_state['holder']})")
+            deadline = time.monotonic() + 20  # the leader already took it: wait for its answer instead of re-sending
+
+
+async def _rpc_run(doc: dict) -> None:
+    headers = {"x-internal-token": os.environ.get("WHATSAPP_INTERNAL_TOKEN", ""), "x-store-id": doc.get("store_id") or ""}
+    try:
+        async with httpx.AsyncClient(timeout=8 if doc["path"] == "/status" else 20) as client:
+            res = await client.request(doc["method"], f"{LOCAL_URL}{doc['path']}", json=doc.get("body"), headers=headers)
+            result = res.json() if res.content else {}
+    except Exception as exc:
+        logger.warning("whatsapp queued %s %s: %s: %s", doc["method"], doc["path"], type(exc).__name__, exc)
+        result = {"status": "offline", "is_connected": False, "detail": "Serviço do WhatsApp indisponível"}
+    await raw_db.wa_rpc.update_one({"_id": doc["_id"]}, {"$set": {"state": "done", "result": result}})
+
+
+async def rpc_serve() -> None:
+    """Leader only: run the bridge calls other replicas queued in `wa_rpc`."""
+    try:
+        await raw_db.wa_rpc.create_index("created_at", expireAfterSeconds=300, name="rpc_ttl")  # leftovers from crashed callers
+        await raw_db.wa_rpc.create_index([("state", 1), ("created_at", 1)], name="rpc_queue")
+    except Exception as exc:
+        logger.warning("whatsapp rpc indexes: %s", exc)
+    running: set[asyncio.Task] = set()
+    while True:
+        try:
+            doc = await raw_db.wa_rpc.find_one_and_update({"state": "pending", "expires_at": {"$gt": time.time()}}, {"$set": {"state": "running"}},
+                                                          sort=[("created_at", 1)])
+        except Exception as exc:
+            logger.warning("whatsapp rpc queue: %s", exc)
+            await asyncio.sleep(1)
+            continue
+        if not doc:
+            await asyncio.sleep(RPC_POLL)
+            continue
+        task = asyncio.create_task(_rpc_run(doc))  # calls run side by side; a slow send never blocks a status check
+        running.add(task)
+        task.add_done_callback(running.discard)
 
 
 def auth_root() -> Path:
@@ -208,7 +263,7 @@ async def leader_loop(root: Path) -> None:
                     logger.warning("whatsapp session restore: %s", exc)
                 else:
                     logger.info("whatsapp: %s leads the bridge, restored %s session files", ME, restored)
-                    tasks = [asyncio.create_task(run_bridge(root)), asyncio.create_task(backup_loop(root))]
+                    tasks = [asyncio.create_task(run_bridge(root)), asyncio.create_task(backup_loop(root)), asyncio.create_task(rpc_serve())]
             elif not leading and tasks:
                 logger.warning("whatsapp: %s lost the bridge lease to %s, stopping local bridge", ME, _state["holder"])
                 await stop_tasks(tasks)
@@ -232,16 +287,3 @@ async def start() -> list[asyncio.Task]:
     # credentials they would keep replacing each other ("conflict: replaced" → device_removed). Only production saves/restores.
     return []
 
-
-proxy_router = APIRouter(tags=["whatsapp"])  # replica → leader replica, internal token
-
-
-@proxy_router.api_route("/wa-bridge/{path:path}", methods=["GET", "POST"], include_in_schema=False)
-async def proxy_to_bridge(path: str, request: Request) -> Response:
-    token = os.environ.get("WHATSAPP_INTERNAL_TOKEN", "")
-    if not token or request.headers.get("x-internal-token") != token:
-        raise HTTPException(status_code=401, detail="unauthorized")
-    headers = {k: v for k, v in request.headers.items() if k in ("x-internal-token", "x-store-id", "content-type")}
-    async with httpx.AsyncClient(timeout=20) as client:
-        res = await client.request(request.method, f"{LOCAL_URL}/{path}", content=await request.body(), headers=headers)
-    return Response(res.content, status_code=res.status_code, media_type=res.headers.get("content-type"))

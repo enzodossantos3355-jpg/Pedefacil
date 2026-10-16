@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 
-from lib.ai import wa_send
+from lib.ai import wa_send, wa_send_later
 from lib.dates import today_iso
 from lib.access import check_limit, has_feature, need
 from lib.db import db, raw_db
@@ -159,13 +159,17 @@ async def update_order(order_id: str, input: OrderUpdate):
         data["pix_copia_e_cola"] = await pix_code_for(data["total"], order_id)
     updated = await db.orders.find_one_and_update({"order_id": order_id}, {"$set": data}, return_document=ReturnDocument.AFTER)
     if "status" in data and data["status"] != current["status"]:
-        await notify_status(Order(**updated))
+        await notify_status(Order(**updated), current["status"])
     return Order(**updated)
 
 
-async def notify_status(order: Order) -> None:
+APPROVED_MESSAGE = "✅ Seu pedido #{id} foi confirmado pela loja e já está na fila da cozinha!"
+
+
+async def notify_status(order: Order, previous: str = "") -> None:
     settings = await get_settings()
-    template = STATUS_MESSAGES.get(order.status)
+    # "Novo" is only announced when the store approves an AI order that was "Em Análise"
+    template = APPROVED_MESSAGE if order.status == "Novo" and previous == "Em Análise" else STATUS_MESSAGES.get(order.status)
     if settings["notify_status_changes"] and template and order.customer_phone and has_feature("whatsapp_ia"):
         text = template.format(id=order.order_id[-6:].upper())
         if order.status == "Concluído":
@@ -173,7 +177,7 @@ async def notify_status(order: Order) -> None:
             footer = platform.get("footer_text") or "Atendimento feito com PedeFácil"
             text += f"\n\n✨ {footer}" + (f"\n{platform['site_url']}" if platform.get("site_url") else "")
         chat = await db.chats.find_one({"phone": order.customer_phone}) or {}
-        await wa_send(chat.get("jid") or order.customer_phone, text)
+        wa_send_later(chat.get("jid") or order.customer_phone, text)
 
 
 @router.get("/notifications", response_model=list[AppNotification])
@@ -220,11 +224,12 @@ async def send_to_courier(order_id: str):
 async def update_order_status(order_id: str, input: StatusUpdate):
     if input.status not in STATUS_FLOW:
         raise HTTPException(status_code=422, detail="Status inválido.")
+    previous = (await db.orders.find_one({"order_id": order_id}, {"status": 1}) or {}).get("status", "")
     updated = await db.orders.find_one_and_update({"order_id": order_id}, {"$set": {"status": input.status}}, return_document=ReturnDocument.AFTER)
     if not updated:
         raise HTTPException(status_code=404, detail="Pedido não encontrado.")
     order = Order(**updated)
-    await notify_status(order)
+    await notify_status(order, previous)
     if order.status == "Em Entrega" and order.courier_id:  # leaving for delivery: sheet goes to the courier automatically
         try:
             await send_to_courier(order_id)

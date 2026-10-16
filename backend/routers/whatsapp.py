@@ -10,7 +10,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pymongo import ReturnDocument
 
 from lib.access import enter_store, has_feature, need
-from lib.ai import ask_llm, parse_json, sanitize_phone, wa_call, wa_send
+from lib.ai import ask_llm, parse_json, sanitize_phone, wa_call, wa_send, wa_send_later
 from lib.db import db
 from lib.geo import coords_from_text, find_cep, quote_fee_full
 from lib.pix import gerar_pix
@@ -117,7 +117,7 @@ async def toggle_human(chat_id: str, input: HumanToggle):
         raise HTTPException(status_code=404, detail="Conversa não encontrada.")
     text = HANDOFF_TEXT if input.enable_human else BACK_TO_AI_TEXT
     doc = await push_message(chat_id, "bot", text)
-    await wa_send(doc.get("jid") or doc["phone"], text)
+    wa_send_later(doc.get("jid") or doc["phone"], text)  # background: retries without holding the panel
     return await chat_with_order(doc)
 
 

@@ -51,10 +51,13 @@ async def wa_call(method: str, path: str, body: dict | None = None) -> dict:
     """Each store has its own WhatsApp session in the bridge, selected by the x-store-id header.
     Async client, so a slow bridge only delays this request, never the event loop; /status is polled, so it gives up sooner."""
     from lib.tenant import current_store
-    from lib.wa_bridge import bridge_url  # another replica may be running the bridge
+    from lib.wa_bridge import forward_to_leader, rpc_call  # another replica may be running the bridge
+    timeout = 8 if path == "/status" else 20
     try:
-        async with httpx.AsyncClient(timeout=8 if path == "/status" else 20) as client:
-            res = await client.request(method, f"{bridge_url()}{path}", json=body, headers={**WA_HEADERS, "x-store-id": current_store.get()})
+        if forward_to_leader():
+            return await rpc_call(method, path, body, current_store.get(), timeout)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.request(method, f"{WA_URL}{path}", json=body, headers={**WA_HEADERS, "x-store-id": current_store.get()})
             return res.json() if res.content else {}
     except Exception as exc:  # bridge offline must never break the panel
         logger.warning("whatsapp bridge %s %s: %s: %s", method, path, type(exc).__name__, exc)  # a timeout has an empty message
@@ -76,3 +79,13 @@ async def wa_send(to: str, text: str, pix_key: str = "", pix_code: str = "", pix
         await asyncio.sleep(4 * (attempt + 1))
     logger.warning("WhatsApp: mensagem não enviada para %s", to)
     return False
+
+
+_background: set[asyncio.Task] = set()
+
+
+def wa_send_later(to: str, text: str) -> None:
+    """Send without holding the request; keeps a reference so the task is not garbage-collected mid-retry."""
+    task = asyncio.create_task(wa_send(to, text))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
