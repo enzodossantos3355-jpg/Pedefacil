@@ -5,6 +5,7 @@ A Pix order is created on Mercado Pago with the order total; payment is confirme
 order from Mercado Pago with that store's token (status processed/accredited) — never from a picture or the webhook body.
 """
 
+import json
 import logging
 import re
 
@@ -85,15 +86,30 @@ async def point_token() -> str:
 
 
 async def point_call(method: str, path: str, token: str, body: dict | None = None) -> tuple[int, dict]:
-    async with httpx.AsyncClient(timeout=20) as c:
-        r = await c.request(method, f"{POINT}{path}", json=body, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    """Calls the Point API with Bearer token + JSON; logs URL, body and the full response (never the token)."""
+    url = f"{POINT}{path}"
+    logger.info("Point → %s %s body=%s", method, url, json.dumps(body, ensure_ascii=False) if body is not None else "-")
+    try:
+        async with httpx.AsyncClient(timeout=12) as c:
+            r = await c.request(method, url, json=body, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    except httpx.HTTPError as exc:
+        logger.error("Point ✗ %s %s → sem resposta: %s", method, url, exc)
+        return 504, {"message": f"Mercado Pago não respondeu ({type(exc).__name__})."}
     try:
         data = r.json() if r.content else {}
     except ValueError:
-        data = {}
-    if r.status_code >= 400:
-        logger.error("Point %s %s → %s %s", method, path, r.status_code, r.text[:300])
+        data = {"raw": r.text[:500]}
+    (logger.error if r.status_code >= 400 else logger.info)("Point ← %s %s → %s %s", method, url, r.status_code, r.text[:1500])
     return r.status_code, data
+
+
+def mp_error_detail(code: int, data: dict, fallback: str) -> dict:
+    """Exact Mercado Pago error for the panel: {message, mp_error}."""
+    msg = data.get("message") or data.get("error") or fallback
+    causes = data.get("cause") or data.get("errors") or []
+    if isinstance(causes, list) and causes:
+        msg += " — " + "; ".join(str(c.get("description") or c.get("message") or c) if isinstance(c, dict) else str(c) for c in causes)
+    return {"message": f"Mercado Pago ({code}): {msg}", "mp_error": data}
 
 
 async def payment_approved(payment_id: str, token: str) -> bool:
@@ -102,14 +118,14 @@ async def payment_approved(payment_id: str, token: str) -> bool:
     return r.status_code == 200 and r.json().get("status") == "approved"
 
 
-async def sync_point(order: dict, token: str | None = None) -> dict:
+async def sync_point(order: dict, token: str | None = None, raise_errors: bool = False):
     """Reads the intent state on Mercado Pago; PROCESSED (or FINISHED with an approved payment) marks the order paid."""
     token = token or await point_token()
     if not order.get("point_intent_id") or not token:
         return order
     code, intent = await point_call("GET", f"/payment-intents/{order['point_intent_id']}", token)
     if code != 200:
-        return order
+        return (code, intent) if raise_errors else order
     state = intent.get("state", "")
     pay_id = str((intent.get("payment") or {}).get("id") or "")
     paid = state == "PROCESSED" or (state in ("FINISHED", "CONFIRMATION_REQUIRED") and pay_id and await payment_approved(pay_id, token))
@@ -117,4 +133,4 @@ async def sync_point(order: dict, token: str | None = None) -> dict:
     if paid and order.get("payment_status") != "pago":
         upd.update(payment_status="pago", payment_method="Cartão (Point)", receipt_note=f"Pago na maquininha Point (pagamento {pay_id or '?'})")
     await db.orders.update_one({"order_id": order["order_id"]}, {"$set": upd})
-    return {**order, **upd}
+    return None if raise_errors else {**order, **upd}

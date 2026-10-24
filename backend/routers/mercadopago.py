@@ -6,7 +6,7 @@ from lib.db import db, raw_db
 import asyncio
 import os
 
-from lib.mercadopago import POINT_ACTIVE, check_token, confirm_if_paid, point_call, point_token, store_token, sync_point
+from lib.mercadopago import POINT_ACTIVE, check_token, confirm_if_paid, mp_error_detail, point_call, point_token, store_token, sync_point
 from lib.tenant import current_store
 from models.domain import MercadoPagoStatus, MercadoPagoToken, Order, PointCharge, PointDevice, PointDeviceChoice
 
@@ -95,15 +95,24 @@ async def pagar_point(order_id: str, input: PointCharge):
     token = await point_token()
     if not device or not token:
         raise HTTPException(status_code=422, detail="Configure a Point Smart 2 em Configurações → Pix / Mercado Pago.")
-    body = {"amount": int(round(o["total"] * 100)), "description": f"Pedido #{order_id[-6:].upper()}",
+    # The machine must exist on this account and be in integrated (PDV) mode, otherwise the intent never shows up
+    code, devs = await point_call("GET", "/devices?offset=0&limit=50", token)
+    if code >= 400:
+        raise HTTPException(status_code=code, detail=mp_error_detail(code, devs, "não consegui consultar as maquininhas"))
+    dev = next((d for d in devs.get("devices", []) if d.get("id") == device), None)
+    if not dev:
+        raise HTTPException(status_code=404, detail={"message": f"A maquininha {device} não foi encontrada nesta conta Mercado Pago. Em Configurações, clique em Buscar maquininhas e escolha de novo.", "mp_error": devs})
+    if dev.get("operating_mode") != "PDV":
+        await point_call("PATCH", f"/devices/{device}", token, {"operating_mode": "PDV"})
+        raise HTTPException(status_code=409, detail={"message": "A maquininha não estava no modo integrado (PDV). Já pedi a troca: reinicie a Point Smart 2 e tente cobrar de novo.", "mp_error": dev})
+    # amount: integer NUMBER in centavos (Point Payment Intent API: 1500 = R$ 15,00) — never a string, never with comma
+    body = {"amount": int(round(float(o["total"]) * 100)), "description": f"Pedido #{order_id[-6:].upper()}",
             "additional_info": {"external_reference": order_id, "print_on_terminal": True}}
     if input.type:
         body["payment"] = {"type": input.type, **({"installments": 1} if input.type == "credit_card" else {})}
     code, data = await point_call("POST", f"/devices/{device}/payment-intents", token, body)
-    if code == 409:
-        raise HTTPException(status_code=409, detail="A maquininha já tem uma cobrança na tela. Cancele ou conclua antes.")
-    if code >= 400 or not data.get("id"):
-        raise HTTPException(status_code=502, detail="O Mercado Pago recusou a cobrança na maquininha.")
+    if code >= 400 or not data.get("id"):  # pass Mercado Pago's own status + JSON error to the panel
+        raise HTTPException(status_code=code if code >= 400 else 502, detail=mp_error_detail(code, data, "a cobrança não foi criada"))
     await db.orders.update_one({"order_id": order_id}, {"$set": {"point_intent_id": data["id"], "point_state": "OPEN", "point_device_id": device}})
     return Order(**await _point_order(order_id))
 
@@ -113,9 +122,9 @@ async def cancelar_point(order_id: str):
     o = await _point_order(order_id)
     if o.get("point_intent_id"):
         device = o.get("point_device_id") or (await db.mp_credentials.find_one({}) or {}).get("point_device_id", "")
-        code, _ = await point_call("DELETE", f"/devices/{device}/payment-intents/{o['point_intent_id']}", await point_token())
+        code, err = await point_call("DELETE", f"/devices/{device}/payment-intents/{o['point_intent_id']}", await point_token())
         if code >= 400 and code != 404:
-            raise HTTPException(status_code=409, detail="A cobrança já está na tela da maquininha: cancele direto na Point Smart 2.")
+            raise HTTPException(status_code=code, detail=mp_error_detail(code, err, "se a cobrança já está na tela, cancele direto na Point Smart 2"))
     await db.orders.update_one({"order_id": order_id}, {"$set": {"point_intent_id": "", "point_state": "CANCELED"}})
     return Order(**await _point_order(order_id))
 
@@ -125,7 +134,9 @@ async def point_status(order_id: str):
     """Fallback polling (the webhook is the main path)."""
     o = await _point_order(order_id)
     if o.get("point_intent_id") and o.get("payment_status") != "pago" and (o.get("point_state") in POINT_ACTIVE or not o.get("point_state")):
-        await sync_point(o)
+        err = await sync_point(o, raise_errors=True)
+        if err:
+            raise HTTPException(status_code=err[0], detail=mp_error_detail(err[0], err[1], "não consegui consultar a cobrança"))
     return Order(**await _point_order(order_id))
 
 
