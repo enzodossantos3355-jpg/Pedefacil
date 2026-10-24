@@ -113,18 +113,24 @@ async def pagar_point(order_id: str, input: PointCharge):
     code, data = await point_call("POST", f"/devices/{device}/payment-intents", token, body)
     if code >= 400 or not data.get("id"):  # pass Mercado Pago's own status + JSON error to the panel
         raise HTTPException(status_code=code if code >= 400 else 502, detail=mp_error_detail(code, data, "a cobrança não foi criada"))
-    await db.orders.update_one({"order_id": order_id}, {"$set": {"point_intent_id": data["id"], "point_state": "OPEN", "point_device_id": device}})
+    await db.orders.update_one({"order_id": order_id}, {"$set": {"point_intent_id": data["id"], "point_state": "OPEN", "point_device_id": device, "point_type": input.type},
+                                                        "$addToSet": {"point_intents": data["id"]}})  # history: a released charge paid later is still recognized
     return Order(**await _point_order(order_id))
 
 
 @router.post("/pedidos/{order_id}/cancelar-point", response_model=Order)
-async def cancelar_point(order_id: str):
+async def cancelar_point(order_id: str, force: bool = False):
+    """Cancels on Mercado Pago (only possible while OPEN). `force=true` releases the order in the panel when the
+    charge is already on the machine's screen (it must be cancelled on the Point itself)."""
     o = await _point_order(order_id)
-    if o.get("point_intent_id"):
+    if o.get("point_intent_id") and not force:
         device = o.get("point_device_id") or (await db.mp_credentials.find_one({}) or {}).get("point_device_id", "")
         code, err = await point_call("DELETE", f"/devices/{device}/payment-intents/{o['point_intent_id']}", await point_token())
         if code >= 400 and code != 404:
-            raise HTTPException(status_code=code, detail=mp_error_detail(code, err, "se a cobrança já está na tela, cancele direto na Point Smart 2"))
+            detail = mp_error_detail(code, err, "a cobrança já está na tela da maquininha")
+            detail["message"] += " · Cancele na tela da Point Smart 2 e use “Liberar no painel”."
+            detail["can_force"] = True
+            raise HTTPException(status_code=code, detail=detail)
     await db.orders.update_one({"order_id": order_id}, {"$set": {"point_intent_id": "", "point_state": "CANCELED"}})
     return Order(**await _point_order(order_id))
 
@@ -142,14 +148,14 @@ async def point_status(order_id: str):
 
 async def _handle_point_event(intent_id: str, store: str) -> None:
     if not store:  # webhook without ?store=: find which restaurant owns this intent
-        o = await raw_db.orders.find_one({"point_intent_id": intent_id}, {"store_id": 1})
+        o = await raw_db.orders.find_one({"$or": [{"point_intent_id": intent_id}, {"point_intents": intent_id}]}, {"store_id": 1})
         store = (o or {}).get("store_id", "")
     if not store:
         return
     current_store.set(store)
-    o = await db.orders.find_one({"point_intent_id": intent_id})
+    o = await db.orders.find_one({"$or": [{"point_intent_id": intent_id}, {"point_intents": intent_id}]})
     if o:
-        await sync_point(o)
+        await sync_point({**o, "point_intent_id": intent_id})
 
 
 @public_router.post("/webhooks/mercadopago")

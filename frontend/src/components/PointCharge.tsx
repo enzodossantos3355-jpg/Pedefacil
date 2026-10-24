@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, CreditCard, Loader2, XCircle } from "lucide-react";
 import { toast } from "sonner";
-import { apiGet, apiPost } from "@/lib/api";
+import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { formatCurrency, type MercadoPagoStatus, type Order } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -35,7 +35,13 @@ export default function PointCharge({ order }: { order: Order }) {
     onSuccess: (o) => { setSentAt(Date.now()); client.setQueryData(["point", order.order_id], o); client.invalidateQueries({ queryKey: ["orders"] }); },
     onError: (e: Error) => toast.error(e.message, { duration: 10000 }),
   });
-  const cancel = useMutation({ mutationFn: () => withTimeout(apiPost<Order>(`/pedidos/${order.order_id}/cancelar-point`)), onSuccess: () => { client.invalidateQueries({ queryKey: ["orders"] }); toast.success("Cobrança cancelada na maquininha."); }, onError: (e: Error) => toast.error(e.message) });
+  const [canForce, setCanForce] = useState(false);
+  const cancel = useMutation({
+    mutationFn: (force: boolean) => withTimeout(apiPost<Order>(`/pedidos/${order.order_id}/cancelar-point${force ? "?force=true" : ""}`)),
+    onSuccess: (o, force) => { setCanForce(false); client.setQueryData(["point", order.order_id], o); client.removeQueries({ queryKey: ["point", order.order_id] }); client.invalidateQueries({ queryKey: ["orders"] }); toast.success(force ? "Pedido liberado no painel. Cancele também na tela da maquininha." : "Cobrança cancelada na maquininha."); },
+    onError: (e: Error) => { if (e instanceof ApiError && (e.body as { detail?: { can_force?: boolean } })?.detail?.can_force) setCanForce(true); toast.error(e.message, { duration: 10000 }); },
+  });
+  const ForceRelease = () => (canForce ? <Button variant="outline" className="w-full" disabled={cancel.isPending} onClick={() => cancel.mutate(true)} data-testid="point-charge-force-release">Liberar no painel (já cancelei na maquininha)</Button> : null);
   if (!mp.data?.point_device_id || (order.payment_status === "pago" && !open)) return null;
   const isWaiting = !paid && !!live.point_intent_id && WAITING.includes(live.point_state) && !status.error;
   const notArrived = isWaiting && live.point_state === "OPEN" && now - sentAt > NOT_ARRIVED_MS;
@@ -53,13 +59,15 @@ export default function PointCharge({ order }: { order: Order }) {
         ) : status.error ? (
           <div className="space-y-2" data-testid="point-charge-error">
             <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700" data-testid="point-charge-error-message">{(status.error as Error).message}</p>
-            <div className="grid grid-cols-2 gap-2"><Button variant="outline" onClick={() => status.refetch()} data-testid="point-charge-retry-status">Consultar de novo</Button><Button variant="outline" className="text-red-600" disabled={cancel.isPending} onClick={() => cancel.mutate()} data-testid="point-charge-cancel">Cancelar cobrança</Button></div>
+            <div className="grid grid-cols-2 gap-2"><Button variant="outline" onClick={() => status.refetch()} data-testid="point-charge-retry-status">Consultar de novo</Button><Button variant="outline" className="text-red-600" disabled={cancel.isPending} onClick={() => cancel.mutate(false)} data-testid="point-charge-cancel">Cancelar cobrança</Button></div>
+            <ForceRelease />
           </div>
         ) : isWaiting ? (
           <div className="space-y-3" data-testid="point-charge-waiting">
             <p className="flex items-center justify-center gap-2 py-2 text-sm text-sky-800"><Loader2 size={16} className="animate-spin" /> {STATE_TEXT[live.point_state] ?? "Aguardando pagamento na maquininha..."}</p>
             {notArrived && <p className="rounded-xl bg-amber-50 p-3 text-xs text-amber-900" data-testid="point-charge-not-arrived">A cobrança ainda não apareceu na maquininha. Confira se a Point Smart 2 está ligada, com internet, logada na mesma conta e no modo integrado. Se precisar, cancele e cobre de novo.</p>}
-            <Button variant="outline" className="w-full text-red-600 hover:bg-red-50" disabled={cancel.isPending} onClick={() => cancel.mutate()} data-testid="point-charge-cancel"><XCircle size={15} className="mr-1.5" /> Cancelar cobrança</Button>
+            <Button variant="outline" className="w-full text-red-600 hover:bg-red-50" disabled={cancel.isPending} onClick={() => cancel.mutate(false)} data-testid="point-charge-cancel"><XCircle size={15} className="mr-1.5" /> Cancelar cobrança</Button>
+            <ForceRelease />
           </div>
         ) : (
           <div className="space-y-2" data-testid="point-charge-start">

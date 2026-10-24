@@ -112,10 +112,13 @@ def mp_error_detail(code: int, data: dict, fallback: str) -> dict:
     return {"message": f"Mercado Pago ({code}): {msg}", "mp_error": data}
 
 
-async def payment_approved(payment_id: str, token: str) -> bool:
+async def get_payment(payment_id: str, token: str) -> dict:
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.get(f"{MP}/v1/payments/{payment_id}", headers={"Authorization": f"Bearer {token}"})
-    return r.status_code == 200 and r.json().get("status") == "approved"
+    return r.json() if r.status_code == 200 else {}
+
+
+CARD_METHOD = {"credit_card": "Cartão Crédito", "debit_card": "Cartão Débito", "prepaid_card": "Cartão Débito"}
 
 
 async def sync_point(order: dict, token: str | None = None, raise_errors: bool = False):
@@ -128,9 +131,14 @@ async def sync_point(order: dict, token: str | None = None, raise_errors: bool =
         return (code, intent) if raise_errors else order
     state = intent.get("state", "")
     pay_id = str((intent.get("payment") or {}).get("id") or "")
-    paid = state == "PROCESSED" or (state in ("FINISHED", "CONFIRMATION_REQUIRED") and pay_id and await payment_approved(pay_id, token))
+    payment = await get_payment(pay_id, token) if pay_id and state in ("PROCESSED", "FINISHED", "CONFIRMATION_REQUIRED") else {}
+    paid = state == "PROCESSED" or payment.get("status") == "approved"
     upd: dict = {"point_state": state}
     if paid and order.get("payment_status") != "pago":
-        upd.update(payment_status="pago", payment_method="Cartão (Point)", receipt_note=f"Pago na maquininha Point (pagamento {pay_id or '?'})")
+        # real card type of the payment → lands in the Cartão Crédito / Cartão Débito tab
+        kind = payment.get("payment_type_id") or (intent.get("payment") or {}).get("type") or order.get("point_type") or ""
+        method = CARD_METHOD.get(kind, "Cartão Débito" if "debit" in kind else "Cartão Crédito")
+        brand = (payment.get("payment_method_id") or "").upper()
+        upd.update(payment_status="pago", payment_method=method, receipt_note=f"Pago na Point Smart 2 · {method}{f' {brand}' if brand else ''} (pagamento {pay_id or '?'})")
     await db.orders.update_one({"order_id": order["order_id"]}, {"$set": upd})
     return None if raise_errors else {**order, **upd}
