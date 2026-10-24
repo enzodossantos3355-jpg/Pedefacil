@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 
 from lib.ai import wa_send, wa_send_later
-from lib.dates import today_iso
+from lib.dates import local_date, today_iso
 from lib.access import check_limit, has_feature, need
 from lib.db import db, raw_db
 
@@ -20,6 +20,7 @@ from models.domain import (
     LEGACY_STATUS, STATUS_FLOW, Courier, CourierCreate, Customer, CustomerCreate, DashboardSummary, DayOpenRequest, DayStatus,
     DeliveryZone, DeliveryZoneCreate, FeeQuote, FeeQuoteResult, Order, OrderCreate, OrderUpdate, Product,
     AppNotification, CourierEarning, DayClose, DayCloseDetail, ReportLine, PixCharge, ProductCreate, ReportSummary, StatusUpdate, StoreSettings, new_id,
+    UNKNOWN_NAME, normalize_phone, phone_variants,
 )
 import os
 
@@ -57,20 +58,20 @@ def is_today(dt: datetime, ref: str) -> bool:
 
 
 async def all_orders() -> list[Order]:
-    return [Order(**d) for d in await db.orders.find().sort("created_at", -1).to_list(2000)]
+    return [Order(**d) for d in await db.orders.find({"archived": {"$ne": True}}).sort("created_at", -1).to_list(2000)]
 
 
 def metrics(orders: list[Order]) -> dict:
     today = today_iso()
     month = today[:7]
     valid = [o for o in orders if o.status != "Cancelado"]
-    today_valid = [o for o in valid if o.created_at.strftime("%Y-%m-%d") == today] or valid
+    today_valid = valid  # all_orders() is already only the open (not archived) day
     revenue = sum(o.total for o in today_valid)
     fees = [o.delivery_fee for o in valid if o.delivery_type == "Entrega"]
     return {
         "today": today,
         "revenue": revenue,
-        "month_revenue": sum(o.total for o in valid if o.created_at.strftime("%Y-%m") == month) or sum(o.total for o in valid),
+        "month_revenue": sum(o.total for o in valid if local_date(o.created_at)[:7] == month),
         "avg_ticket": revenue / len(today_valid) if today_valid else 0,
         "avg_fee": sum(fees) / len(fees) if fees else 0,
         "valid": valid,
@@ -89,7 +90,9 @@ async def dashboard():
 @router.get("/orders", response_model=list[Order])
 async def list_orders():
     """Only the current (not yet archived) day; archived days live in Armazenamento."""
-    return [Order(**d) for d in await db.orders.find({"archived": {"$ne": True}}).sort("created_at", -1).to_list(2000)]
+    docs = await db.orders.find({"archived": {"$ne": True}}).sort("created_at", -1).to_list(2000)
+    saved = {normalize_phone(c["phone"]): c["name"] for c in await db.customers.find({"phone": {"$ne": ""}}, {"_id": 0, "phone": 1, "name": 1}).to_list(5000) if c.get("phone") and c.get("name") and c["name"] != UNKNOWN_NAME}
+    return [Order(**{**d, "customer_name": saved.get(normalize_phone(d.get("customer_phone")), d.get("customer_name"))}) for d in docs]  # saved customer name wins over the one typed on the order
 
 
 async def pix_code_for(total: float, order_id: str) -> str:
@@ -99,6 +102,18 @@ async def pix_code_for(total: float, order_id: str) -> str:
         return ""
     pix = await gerar_pix(total, order_id, settings)
     return pix["copiaECola"] if pix else ""
+
+
+async def adjust_stock(items, sign: int) -> None:
+    """sign=+1 takes items out of stock, -1 puts them back. Atomic; products without stock control are skipped."""
+    for item in items:
+        pid = item.product_id if hasattr(item, "product_id") else item["product_id"]
+        qty = item.quantity if hasattr(item, "quantity") else item["quantity"]
+        if not qty:
+            continue
+        res = await db.products.find_one_and_update({"product_id": pid, "stock": {"$ne": None}}, {"$inc": {"stock": -sign * qty}}, return_document=ReturnDocument.AFTER)
+        if res and res["stock"] <= 0:
+            await db.products.update_one({"product_id": pid}, {"$set": {"stock": 0, "active": False}})
 
 
 async def create_order_record(input: OrderCreate) -> Order:
@@ -120,14 +135,12 @@ async def create_order_record(input: OrderCreate) -> Order:
         order.payment_status = "pago"  # staff chose the method at the counter
     order.pix_copia_e_cola = await pix_code_for(order.total, order.order_id)
     await db.orders.insert_one(order.model_dump())
-    for item in input.items:  # automatic stock decrement
-        await db.products.update_one({"product_id": item.product_id, "stock": {"$ne": None}}, {"$inc": {"stock": -item.quantity}})
-        await db.products.update_one({"product_id": item.product_id, "stock": {"$lte": 0}}, {"$set": {"stock": 0, "active": False}})
+    await adjust_stock(input.items, +1)  # automatic stock decrement
     if input.customer_phone:
         update = {"$set": {"name": input.customer_name, "phone": input.customer_phone, "address": input.address or ""}, "$inc": {"orders_count": 1, "total_spent": order.total}, "$setOnInsert": {"customer_id": new_id("cust"), "notes": "", "preferences": []}}
         if input.address:
             update["$addToSet"] = {"addresses": input.address}
-        await db.customers.update_one({"phone": input.customer_phone}, update, upsert=True)
+        await db.customers.update_one({"phone": {"$in": phone_variants(input.customer_phone)}}, update, upsert=True)  # also heals a customer saved without 55
     return order
 
 
@@ -157,6 +170,23 @@ async def update_order(order_id: str, input: OrderUpdate):
         data["payments"] = pays
     if data["total"] != current.get("total"):
         data["pix_copia_e_cola"] = await pix_code_for(data["total"], order_id)
+    returned = bool(current.get("stock_returned"))
+    new_status = data.get("status", current["status"])
+    if new_status == "Cancelado" and not returned:  # cancelled: items go back to stock once
+        await adjust_stock(current["items"], -1)
+        data["stock_returned"] = True
+    elif new_status != "Cancelado" and returned:  # re-opened: take them out again
+        await adjust_stock(data.get("items", current["items"]), +1)
+        data["stock_returned"] = False
+    elif "items" in data and not returned:  # edited items: move only the difference
+        old_q, new_q = {}, {}
+        for i in current["items"]:
+            old_q[i["product_id"]] = old_q.get(i["product_id"], 0) + i["quantity"]
+        for i in data["items"]:
+            new_q[i["product_id"]] = new_q.get(i["product_id"], 0) + i["quantity"]
+        diff = [{"product_id": p, "quantity": new_q.get(p, 0) - old_q.get(p, 0)} for p in set(old_q) | set(new_q)]
+        await adjust_stock([d for d in diff if d["quantity"] > 0], +1)
+        await adjust_stock([{**d, "quantity": -d["quantity"]} for d in diff if d["quantity"] < 0], -1)
     updated = await db.orders.find_one_and_update({"order_id": order_id}, {"$set": data}, return_document=ReturnDocument.AFTER)
     if "status" in data and data["status"] != current["status"]:
         await notify_status(Order(**updated), current["status"])
@@ -256,8 +286,11 @@ async def order_pix(order_id: str):
 
 @router.delete("/orders/{order_id}", dependencies=OPEN_DAY)
 async def delete_order(order_id: str):
-    if not (await db.orders.delete_one({"order_id": order_id})).deleted_count:
+    current = await db.orders.find_one({"order_id": order_id})
+    if not current or not (await db.orders.delete_one({"order_id": order_id})).deleted_count:
         raise HTTPException(status_code=404, detail="Pedido não encontrado.")
+    if current["status"] != "Cancelado" and not current.get("stock_returned"):
+        await adjust_stock(current["items"], -1)
     return {"ok": True}
 
 
@@ -276,7 +309,16 @@ async def create_product(input: ProductCreate):
 
 @router.put("/products/{product_id}", response_model=Product)
 async def update_product(product_id: str, input: ProductCreate):
-    updated = await db.products.find_one_and_update({"product_id": product_id}, {"$set": input.model_dump()}, return_document=ReturnDocument.AFTER)
+    updated = await db.products.find_one_and_update({"product_id": product_id}, {"$set": input.model_dump(exclude_unset=True)}, return_document=ReturnDocument.AFTER)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Item não encontrado.")
+    return Product(**updated)
+
+
+@router.patch("/products/{product_id}/active", response_model=Product)
+async def set_product_active(product_id: str, body: dict):
+    """Pause/activate only; never rewrites stock or any other field."""
+    updated = await db.products.find_one_and_update({"product_id": product_id}, {"$set": {"active": bool(body.get("active"))}}, return_document=ReturnDocument.AFTER)
     if not updated:
         raise HTTPException(status_code=404, detail="Item não encontrado.")
     return Product(**updated)
@@ -295,11 +337,26 @@ async def list_customers():
     return [Customer(**{**d, **profiles.get(d.get("phone", ""), {})}) for d in await db.customers.find().sort("name", 1).to_list(2000)]
 
 
+async def sync_customer_name(phone: str, name: str) -> None:
+    """A saved customer's name shows in the WhatsApp panel and on the open orders of the same number."""
+    if not phone or not name or name == UNKNOWN_NAME:
+        return
+    variants = phone_variants(phone)
+    await db.chats.update_many({"phone": {"$in": variants}}, {"$set": {"customer_name": name}})
+    await db.orders.update_many({"customer_phone": {"$in": variants}, "status": {"$nin": ["Concluído", "Cancelado"]}, "archived": {"$ne": True}}, {"$set": {"customer_name": name}})
+
+
 @router.post("/customers", response_model=Customer)
 async def create_customer(input: CustomerCreate):
+    existing = await db.customers.find_one({"phone": {"$in": phone_variants(input.phone)}}) if input.phone else None
+    if existing:  # same number already in the CRM (e.g. created by an order or the WhatsApp AI): update it, never duplicate
+        updated = await db.customers.find_one_and_update({"customer_id": existing["customer_id"]}, {"$set": input.model_dump()}, return_document=ReturnDocument.AFTER)
+        await sync_customer_name(input.phone, input.name)
+        return Customer(**updated)
     await check_limit("customers", await db.customers.count_documents({}))
     customer = Customer(**input.model_dump(), addresses=[input.address] if input.address else [])
     await db.customers.insert_one(customer.model_dump())
+    await sync_customer_name(customer.phone, customer.name)
     return customer
 
 
@@ -308,6 +365,7 @@ async def update_customer(customer_id: str, input: CustomerCreate):
     updated = await db.customers.find_one_and_update({"customer_id": customer_id}, {"$set": input.model_dump()}, return_document=ReturnDocument.AFTER)
     if not updated:
         raise HTTPException(status_code=404, detail="Cliente não encontrado.")
+    await sync_customer_name(input.phone, input.name)
     return Customer(**updated)
 
 

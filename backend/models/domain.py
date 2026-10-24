@@ -9,6 +9,21 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
+UNKNOWN_NAME = "Cliente WhatsApp"  # placeholder name for a contact whose name nobody knows yet
+
+
+def normalize_phone(v: str | None) -> str:
+    """One phone format everywhere (same as the WhatsApp chat key): digits only, 55 added when typed as DDD + number."""
+    d = "".join(ch for ch in (v or "") if ch.isdigit()).lstrip("0")
+    return "55" + d if len(d) in (10, 11) else d
+
+
+def phone_variants(v: str | None) -> list[str]:
+    """Stored values a lookup should match: the normalized number and the legacy one typed without 55."""
+    n = normalize_phone(v)
+    return [n, n[2:]] if n.startswith("55") and len(n) in (12, 13) else [n]
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -157,6 +172,11 @@ class OrderCreate(BaseModel):
     source: str = "balcao"
     table_number: int | None = None
 
+    @field_validator("customer_phone")
+    @classmethod
+    def norm_phone(cls, v: str) -> str:
+        return normalize_phone(v)
+
 
 class OrderUpdate(BaseModel):
     surcharge: float | None = None
@@ -176,6 +196,11 @@ class OrderUpdate(BaseModel):
     delivery_fee: float | None = None
     courier_id: str | None = None
 
+    @field_validator("customer_phone")
+    @classmethod
+    def norm_phone(cls, v: str | None) -> str | None:
+        return None if v is None else normalize_phone(v)
+
 
 class Order(BaseModel):
     surcharge: float = 0
@@ -184,6 +209,8 @@ class Order(BaseModel):
     payment_status: Literal["pendente", "em_verificacao", "pago"] = "pendente"
     receipt_note: str = ""
     mp_order_id: str = ""  # Mercado Pago Pix order (automatic confirmation)
+    point_intent_id: str = ""  # Point Smart 2 payment intent
+    point_state: str = ""  # OPEN | ON_TERMINAL | PROCESSING | PROCESSED | CANCELED | ERROR | ABANDONED ...
     payments: list[PaymentPart] = []  # what the AI read on the Pix receipt
     order_id: str = Field(default_factory=lambda: new_id("ord"))
     customer_name: str
@@ -205,6 +232,11 @@ class Order(BaseModel):
     source: str = "balcao"
     table_number: int | None = None
     created_at: datetime = Field(default_factory=now_utc)
+
+    @field_validator("customer_phone")
+    @classmethod
+    def norm_phone(cls, v: str) -> str:  # old records saved as typed still match the chat
+        return normalize_phone(v)
 
 
 class ProductCreate(BaseModel):
@@ -229,6 +261,11 @@ class CustomerCreate(BaseModel):
     phone: str = ""
     address: str = ""
     notes: str = ""
+
+    @field_validator("phone")
+    @classmethod
+    def norm_phone(cls, v: str) -> str:
+        return normalize_phone(v)
 
 
 class Customer(CustomerCreate):
@@ -551,3 +588,17 @@ class MercadoPagoStatus(BaseModel):
     configured: bool
     account: str = ""
     store_id: str = ""  # used to build the webhook URL shown in settings
+    point_device_id: str = ""  # Point Smart 2 chosen in settings
+
+
+class PointDevice(BaseModel):
+    id: str
+    operating_mode: str = ""
+
+
+class PointDeviceChoice(BaseModel):
+    device_id: str = Field(min_length=3)
+
+
+class PointCharge(BaseModel):
+    type: Literal["", "credit_card", "debit_card"] = ""  # empty = customer chooses on the terminal

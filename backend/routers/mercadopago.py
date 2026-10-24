@@ -3,9 +3,12 @@
 from fastapi import APIRouter, HTTPException, Request
 
 from lib.db import db, raw_db
-from lib.mercadopago import check_token, confirm_if_paid, store_token
+import asyncio
+import os
+
+from lib.mercadopago import POINT_ACTIVE, check_token, confirm_if_paid, point_call, point_token, store_token, sync_point
 from lib.tenant import current_store
-from models.domain import MercadoPagoStatus, MercadoPagoToken
+from models.domain import MercadoPagoStatus, MercadoPagoToken, Order, PointCharge, PointDevice, PointDeviceChoice
 
 router = APIRouter(tags=["mercadopago"])
 public_router = APIRouter(tags=["mercadopago"])
@@ -14,7 +17,7 @@ public_router = APIRouter(tags=["mercadopago"])
 @router.get("/payments/mercadopago", response_model=MercadoPagoStatus)
 async def mp_status():
     doc = await db.mp_credentials.find_one({}) or {}
-    return MercadoPagoStatus(configured=bool(doc.get("access_token")), account=doc.get("account", ""), store_id=current_store.get())
+    return MercadoPagoStatus(configured=bool(doc.get("access_token")), account=doc.get("account", ""), store_id=current_store.get(), point_device_id=doc.get("point_device_id", ""))
 
 
 @router.put("/payments/mercadopago", response_model=MercadoPagoStatus)
@@ -55,16 +58,102 @@ async def order_payment_status(order_id: str):
     return {"order_id": order_id, "payment_status": "pago" if paid else o.get("payment_status", "pendente")}
 
 
+@router.get("/payments/point/devices", response_model=list[PointDevice])
+async def point_devices():
+    token = await point_token()
+    if not token:
+        raise HTTPException(status_code=422, detail="Conecte sua conta Mercado Pago (Access Token) primeiro.")
+    code, data = await point_call("GET", "/devices?offset=0&limit=50", token)
+    if code != 200:
+        raise HTTPException(status_code=502, detail="Não consegui listar as maquininhas no Mercado Pago.")
+    return [PointDevice(id=d.get("id", ""), operating_mode=d.get("operating_mode", "")) for d in data.get("devices", [])]
+
+
+@router.put("/payments/point/device", response_model=MercadoPagoStatus)
+async def point_choose(input: PointDeviceChoice):
+    token = await point_token()
+    code, _ = await point_call("PATCH", f"/devices/{input.device_id}", token, {"operating_mode": "PDV"})  # integrated mode
+    if code >= 400:
+        raise HTTPException(status_code=422, detail="Não consegui colocar a maquininha no modo integrado (PDV). Confira se ela está ligada e logada na sua conta.")
+    await db.mp_credentials.update_one({}, {"$set": {"point_device_id": input.device_id}}, upsert=True)
+    return await mp_status()
+
+
+async def _point_order(order_id: str) -> dict:
+    o = await db.orders.find_one({"order_id": order_id})
+    if not o:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado.")
+    return o
+
+
+@router.post("/pedidos/{order_id}/pagar-point", response_model=Order)
+async def pagar_point(order_id: str, input: PointCharge):
+    o = await _point_order(order_id)
+    if o.get("payment_status") == "pago":
+        raise HTTPException(status_code=409, detail="Este pedido já está pago.")
+    device = (await db.mp_credentials.find_one({}) or {}).get("point_device_id") or os.environ.get("MP_DEVICE_ID", "")
+    token = await point_token()
+    if not device or not token:
+        raise HTTPException(status_code=422, detail="Configure a Point Smart 2 em Configurações → Pix / Mercado Pago.")
+    body = {"amount": int(round(o["total"] * 100)), "description": f"Pedido #{order_id[-6:].upper()}",
+            "additional_info": {"external_reference": order_id, "print_on_terminal": True}}
+    if input.type:
+        body["payment"] = {"type": input.type, **({"installments": 1} if input.type == "credit_card" else {})}
+    code, data = await point_call("POST", f"/devices/{device}/payment-intents", token, body)
+    if code == 409:
+        raise HTTPException(status_code=409, detail="A maquininha já tem uma cobrança na tela. Cancele ou conclua antes.")
+    if code >= 400 or not data.get("id"):
+        raise HTTPException(status_code=502, detail="O Mercado Pago recusou a cobrança na maquininha.")
+    await db.orders.update_one({"order_id": order_id}, {"$set": {"point_intent_id": data["id"], "point_state": "OPEN", "point_device_id": device}})
+    return Order(**await _point_order(order_id))
+
+
+@router.post("/pedidos/{order_id}/cancelar-point", response_model=Order)
+async def cancelar_point(order_id: str):
+    o = await _point_order(order_id)
+    if o.get("point_intent_id"):
+        device = o.get("point_device_id") or (await db.mp_credentials.find_one({}) or {}).get("point_device_id", "")
+        code, _ = await point_call("DELETE", f"/devices/{device}/payment-intents/{o['point_intent_id']}", await point_token())
+        if code >= 400 and code != 404:
+            raise HTTPException(status_code=409, detail="A cobrança já está na tela da maquininha: cancele direto na Point Smart 2.")
+    await db.orders.update_one({"order_id": order_id}, {"$set": {"point_intent_id": "", "point_state": "CANCELED"}})
+    return Order(**await _point_order(order_id))
+
+
+@router.get("/pedidos/{order_id}/point-status", response_model=Order)
+async def point_status(order_id: str):
+    """Fallback polling (the webhook is the main path)."""
+    o = await _point_order(order_id)
+    if o.get("point_intent_id") and o.get("payment_status") != "pago" and (o.get("point_state") in POINT_ACTIVE or not o.get("point_state")):
+        await sync_point(o)
+    return Order(**await _point_order(order_id))
+
+
+async def _handle_point_event(intent_id: str, store: str) -> None:
+    if not store:  # webhook without ?store=: find which restaurant owns this intent
+        o = await raw_db.orders.find_one({"point_intent_id": intent_id}, {"store_id": 1})
+        store = (o or {}).get("store_id", "")
+    if not store:
+        return
+    current_store.set(store)
+    o = await db.orders.find_one({"point_intent_id": intent_id})
+    if o:
+        await sync_point(o)
+
+
 @public_router.post("/webhooks/mercadopago")
 async def mp_webhook(request: Request, store: str = ""):
     """Configured in the Mercado Pago panel per store (…/api/webhooks/mercadopago?store=ID). The body only says
     'something changed': we re-read the order from Mercado Pago with that store's token before marking it paid."""
-    if not store or not await raw_db.stores.find_one({"store_id": store}):
-        return {"received": True}
     try:
         body = await request.json()
     except Exception:
         body = {}
+    if body.get("topic") == "point_integration_wh" or body.get("type") == "point_integration_wh" or "state" in body:
+        asyncio.create_task(_handle_point_event(str(body.get("id", "")), store))  # answer 200 now, reconcile after
+        return {"received": True}
+    if not store or not await raw_db.stores.find_one({"store_id": store}):
+        return {"received": True}
     mp_id = (body.get("data") or {}).get("id") or request.query_params.get("data.id", "")
     current_store.set(store)
     flt = {"mp_order_id": mp_id} if mp_id else {"mp_order_id": {"$nin": ["", None]}, "payment_status": {"$ne": "pago"}, "archived": {"$ne": True}}

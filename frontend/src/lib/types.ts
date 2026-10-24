@@ -131,6 +131,8 @@ export interface Order {
   payment_status: "pendente" | "em_verificacao" | "pago";
   receipt_note: string;
   mp_order_id: string;
+  point_intent_id: string;
+  point_state: string;
   payments: PaymentPart[];
   created_at: string;
 }
@@ -350,6 +352,12 @@ export interface MercadoPagoStatus {
   configured: boolean;
   account: string;
   store_id: string;
+  point_device_id: string;
+}
+
+export interface PointDevice {
+  id: string;
+  operating_mode: string;
 }
 
 export interface PaymentPart {

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 
@@ -21,7 +22,7 @@ from lib.tastes import taste_profile
 from models.domain import (
     PaymentPart, pix_amount,
     Chat, ChatMessage, DescriptionRequest, HumanToggle, IncomingMessage, MessageCreate, Order, OrderCreate,
-    OrderItem, SimulateMessage, TextRequest, WhatsAppStart, now_utc,
+    OrderItem, SimulateMessage, TextRequest, WhatsAppStart, now_utc, UNKNOWN_NAME, phone_variants,
 )
 from routers.operations import OPEN_DAY, create_order_record, get_settings, report_summary, update_order, update_order_status
 from models.domain import OrderUpdate, StatusUpdate
@@ -57,8 +58,14 @@ async def whatsapp_reconnect():
 
 async def chat_with_order(doc: dict) -> Chat:
     chat = Chat(**doc)
-    last = await db.orders.find_one({"customer_phone": chat.phone}, sort=[("created_at", -1)])
+    variants = phone_variants(chat.phone)
+    last = await db.orders.find_one({"customer_phone": {"$in": variants}}, sort=[("created_at", -1)])
     chat.latest_order = Order(**last) if last else None
+    saved = await db.customers.find_one({"phone": {"$in": variants}}, {"_id": 0, "name": 1})  # the saved customer's name wins over the WhatsApp profile name
+    if saved and saved.get("name") and saved["name"] != UNKNOWN_NAME:
+        chat.customer_name = saved["name"]
+        if chat.latest_order:
+            chat.latest_order.customer_name = saved["name"]
     return chat
 
 
@@ -126,7 +133,7 @@ BACK_TO_AI_TEXT = "🤖 Seu atendimento voltou para a nossa assistente virtual. 
 _chat_locks: dict[str, asyncio.Lock] = {}
 
 
-def build_system(settings: dict, products: list[dict], zones: list[dict], customer: dict | None, fee_note: str, tastes: dict | None = None) -> str:
+def build_system(settings: dict, products: list[dict], zones: list[dict], customer: dict | None, fee_note: str, tastes: dict | None = None, name: str = "") -> str:
     def fmt(options: list[dict]) -> str:
         return ", ".join(f"{o['name']} R$ {o['price']:.2f}" + (f" (apelidos: {'/'.join(o['aliases'])})" if o.get("aliases") else "") for o in options)
 
@@ -158,7 +165,7 @@ CARDÁPIO DISPONÍVEL:
 ZONAS DE ENTREGA:
 {zone_txt}
 {fee_note}
-Cliente: {(customer or {}).get('name', 'novo cliente')} — {'cliente recorrente com ' + str(customer.get('orders_count', 0)) + ' pedido(s)' if customer and customer.get('orders_count') else 'primeiro contato'}. Preferências e restrições conhecidas: {prefs}. Último endereço: {(customer or {}).get('address', '') or 'não informado'}.
+Cliente: {name or 'NOME DESCONHECIDO'} — {'cliente recorrente com ' + str(customer.get('orders_count', 0)) + ' pedido(s)' if customer and customer.get('orders_count') else 'primeiro contato'}. Preferências e restrições conhecidas: {prefs}. Último endereço: {(customer or {}).get('address', '') or 'não informado'}.
 GOSTOS DO CLIENTE (aprendidos do histórico de pedidos):
 {tastes_txt}
 - Use os gostos para personalizar: a um cliente recorrente, ofereça de forma natural "o de sempre" (o último pedido ou o favorito, com os adicionais de costume). Se ele disser "o de sempre"/"o mesmo", feche esse pedido na hora.
@@ -167,6 +174,7 @@ GOSTOS DO CLIENTE (aprendidos do histórico de pedidos):
 REGRAS:
 - Mensagens CURTAS no estilo WhatsApp: no máximo 2 a 3 linhas. Nada de blocos longos.
 - Na primeira mensagem, cumprimente pelo nome (se recorrente, mostre que reconhece) e pergunte o que deseja. NÃO mande o cardápio sem o cliente pedir.
+- NOME DESCONHECIDO: se o cliente acima está como "NOME DESCONHECIDO", NUNCA ignore a mensagem nem deixe de atender: responda normalmente ao que ele pediu e peça o nome de forma simpática na mesma mensagem (ex.: "Com quem eu falo?"). Quando ele disser o nome, preencha "customer_name" com o nome dele (só o nome, sem frases).
 - Só quando o cliente pedir o cardápio ("cardápio", "o que tem hoje", "menu"): liste os pratos ativos com preço, tamanhos e adicionais de forma enxuta e use "send_menu": true (o sistema envia as fotos dos pratos).
 - SEJA RÁPIDO: assim que o cliente disser o que quer, FECHE O PEDIDO NA HORA com intent "order_confirmed" e responda com um RESUMO curto do pedido (itens, tamanhos, adicionais, observações, retirada/entrega). NÃO peça confirmação ("posso confirmar?") e não repita perguntas.
 - RETIRADA é o padrão: se o cliente não falar em entrega, use delivery_type "Retirada". NUNCA pergunte se é entrega ou retirada. Ao fechar retirada, informe o endereço da loja com o link do Maps.
@@ -176,6 +184,7 @@ REGRAS:
 - Se o produto tem tamanhos e o cliente não disse qual, use o tamanho M (ou o primeiro disponível) sem perguntar.
 - ENTREGA (só quando o cliente pedir entrega): se não houver endereço nem localização, peça apenas o endereço ou a localização. Com endereço ou localização, feche o pedido informando a taxa. Se veio só a localização, feche e peça o complemento (número, apto, referência) na mesma mensagem.
 - ALTERAÇÕES: se o cliente mudar, adicionar ou tirar itens, trocar endereço ou complemento depois de fechar, use "order_confirmed" de novo com o pedido COMPLETO e atualizado. O sistema EDITA o mesmo pedido desta conversa (nunca cria outro); diga "pedido atualizado".
+- DESCONTO/ACRÉSCIMO: o sistema soma os preços do cardápio; um valor só muda o total se estiver em order.discount (R$ a descontar) ou order.surcharge (R$ a acrescentar), sempre o valor TOTAL do pedido inteiro. Use quando o cliente pedir o prato SEM um item/ingrediente e o cardápio ou as instruções da loja disserem quanto descontar, ou quando as instruções da loja definirem uma regra de desconto/acréscimo. NUNCA invente: não conceda desconto, cupom ou acréscimo que o cliente só pediu ou que não esteja no cardápio/instruções da loja. Se não souber o valor, deixe 0 e diga que a equipe confirma. NUNCA diga que o valor diminuiu sem preencher order.discount. A cada "order_confirmed" repita os ajustes já aplicados (veja AJUSTES ATUAIS DO PEDIDO, quando houver).
 - OBSERVAÇÕES: se o cliente pedir algo especial (ex.: "sem cebola", "molho à parte", "tocar o interfone"), coloque em order.notes.
 - PIX: se o cliente quiser pagar com Pix ou pedir a chave/código, use "send_pix": true (o sistema envia o código Pix Copia e Cola; o QR Code só se o cliente pedir QR). Não escreva a chave. Peça o COMPROVANTE depois de pagar, a menos que o Pix seja automático (Mercado Pago), aí a confirmação chega sozinha. Se o cliente mandar um comprovante sem ter pedido o Pix, tudo bem: o sistema confere.
 - COMPROVANTES: o sistema confere o comprovante sozinho. Nunca afirme que um pagamento foi recebido.
@@ -186,8 +195,8 @@ REGRAS:
 - NUNCA use ferramentas, tags XML, markdown, blocos de código ou termos técnicos. O campo "reply" é exatamente o que o cliente vai ler.
 {settings['ai_custom_instructions']}
 Responda SOMENTE com JSON válido:
-{{"reply": "texto para o cliente", "send_pix": false, "send_menu": false, "intent": "chat|order_confirmed|cancel|human", "preferences": ["preferências alimentares detectadas"],
- "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": [{{"name": "nome", "quantity": 1}}]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_intent": "|Pix|Dinheiro|Cartão Crédito|Cartão Débito|Pix + Dinheiro...", "payments": [], "notes": ""}}}}"""
+{{"reply": "texto para o cliente", "send_pix": false, "send_menu": false, "intent": "chat|order_confirmed|cancel|human", "customer_name": "", "preferences": ["preferências alimentares detectadas"],
+ "order": {{"items": [{{"product_id": "...", "size": "", "quantity": 1, "additionals": [{{"name": "nome", "quantity": 1}}]}}], "delivery_type": "Retirada|Entrega", "address": "", "payment_intent": "|Pix|Dinheiro|Cartão Crédito|Cartão Débito|Pix + Dinheiro...", "payments": [], "surcharge": 0, "discount": 0, "notes": ""}}}}"""
 
 
 REPLY_RE = re.compile(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', re.S)
@@ -246,6 +255,20 @@ def price_items(raw_items: list[dict], products: dict[str, dict]) -> list[OrderI
         unit = (size["price"] if size else p["price"]) + sum(a["price"] * a["quantity"] for a in adds)
         items.append(OrderItem(product_id=p["product_id"], name=p["name"], price=unit, quantity=max(1, int(it.get("quantity", 1))), size=size["name"] if size else "", additionals=adds))
     return items
+
+
+def ai_adjustments(o: dict, items: list[OrderItem]) -> dict[str, float]:
+    """Surcharge/discount the AI set (R$, whole order). Only keys it sent are returned; a discount never exceeds the items subtotal."""
+    subtotal = sum(i.price * i.quantity for i in items)
+    out: dict[str, float] = {}
+    for key in ("surcharge", "discount"):
+        try:
+            v = float(str(o[key]).replace(",", ".")) if o.get(key) is not None else None
+        except (KeyError, ValueError):
+            v = None
+        if v is not None and math.isfinite(v):
+            out[key] = round(min(max(v, 0.0), subtotal), 2)
+    return out
 
 
 OPEN_STATUSES = {"$nin": ["Concluído", "Cancelado"]}  # archived (closed-day) orders are never edited
@@ -343,21 +366,36 @@ async def _process_message(input: IncomingMessage, simulated: bool = False) -> C
             return done
     products = await db.products.find({}, {"_id": 0}).to_list(500)
     zones = await db.delivery_zones.find({}, {"_id": 0}).to_list(500)
-    customer = await db.customers.find_one({"phone": phone}, {"_id": 0})
+    customer = await db.customers.find_one({"phone": {"$in": phone_variants(phone)}}, {"_id": 0})
+    known_name = next((n for n in [(customer or {}).get("name"), doc.get("customer_name")] if n and n != UNKNOWN_NAME), "")  # saved customer, else the WhatsApp profile name
+    if customer and customer.get("name") and customer["name"] != UNKNOWN_NAME and doc.get("customer_name") != customer["name"]:
+        await db.chats.update_one({"chat_id": chat_id}, {"$set": {"customer_name": customer["name"]}})
+        doc["customer_name"] = customer["name"]
     fee_note = ""
     lat, lng = doc.get("last_lat"), doc.get("last_lng")
     if lat is not None or find_cep(input.text):
         q = await quote_fee_full(zones, settings, lat, lng, input.text)
         fee_note = f"LOCALIZAÇÃO/CEP RECEBIDO: confirme com gentileza, informe a taxa e, se faltar, peça só o complemento. Taxa de entrega calculada R$ {q['fee']:.2f}" + (f" (zona {q['zone_name']})" if q["zone_name"] else " (fora das zonas: taxa padrão)")
+    current_order = await linked_order(doc, phone)
+    if current_order and (current_order.get("discount") or current_order.get("surcharge")):
+        fee_note += f"\nAJUSTES ATUAIS DO PEDIDO: desconto R$ {current_order.get('discount', 0):.2f}, acréscimo R$ {current_order.get('surcharge', 0):.2f} (repita em order.discount/order.surcharge, a menos que o pedido mude)"
     history = "\n".join(f"{m['sender']}: {m['text']}" for m in doc["messages"][-14:])
     try:
-        raw = await ask_llm(f"wa-{chat_id}", build_system(settings, products, zones, customer, fee_note, await taste_profile(phone)), f"Conversa até agora:\n{history}\n\nResponda à última mensagem do cliente.")
+        raw = await ask_llm(f"wa-{chat_id}", build_system(settings, products, zones, customer, fee_note, await taste_profile(phone), known_name), f"Conversa até agora:\n{history}\n\nResponda à última mensagem do cliente.")
         data = extract_reply(raw)
     except Exception as exc:
         logger.error("LLM falhou: %s", exc)
         data = {"reply": "Desculpe, tive um probleminha agora. Já vou chamar alguém da equipe para te ajudar!", "intent": "human"}
 
     intent, reply, extra, pix = data.get("intent", "chat"), clean_text(data.get("reply") or "") or "Desculpe, não entendi bem. Pode repetir o que deseja? 😊", {}, ""
+    given = re.sub(r"\s+", " ", str(data.get("customer_name") or "")).strip()[:60]
+    if not known_name and len(given) >= 2:  # the contact told us their name: it becomes the saved customer and the chat title
+        if customer:
+            await db.customers.update_one({"customer_id": customer["customer_id"]}, {"$set": {"name": given}})
+        else:
+            await db.customers.update_one({"phone": phone}, {"$set": {"name": given}, "$setOnInsert": {"customer_id": f"cust_{phone}", "orders_count": 0, "total_spent": 0}}, upsert=True)
+        await db.chats.update_one({"chat_id": chat_id}, {"$set": {"customer_name": given}})
+        doc["customer_name"] = known_name = given
     if data.get("preferences"):
         await db.customers.update_one({"phone": phone}, {"$addToSet": {"preferences": {"$each": data["preferences"]}}, "$setOnInsert": {"customer_id": f"cust_{phone}", "name": input.name or "Cliente WhatsApp", "orders_count": 0, "total_spent": 0}}, upsert=True)
     if intent == "human":
@@ -374,6 +412,7 @@ async def _process_message(input: IncomingMessage, simulated: bool = False) -> C
             dtype = o.get("delivery_type") or "Retirada"
             intent_pay = (o.get("payment_intent") or "").strip()
             split = [PaymentPart(method=str(p.get("method", "")), amount=float(p.get("amount") or 0)) for p in (o.get("payments") or [])[:2] if p.get("method")]
+            adj = ai_adjustments(o, items)
             open_order = await linked_order(doc, phone)
             updated = bool(open_order)
             if open_order:  # changes EDIT this conversation's order (never a duplicate); payment stays as it is
@@ -382,9 +421,9 @@ async def _process_message(input: IncomingMessage, simulated: bool = False) -> C
                 if dtype == "Entrega":  # e.g. pickup → delivery: charge the zone fee for the address/location
                     q = await quote_fee_full(zones, settings, open_order.get("latitude") if lat is None else lat, open_order.get("longitude") if lng is None else lng, addr)
                     fee, zone = q["fee"], q["zone_name"]
-                order = await update_order(open_order["order_id"], OrderUpdate(delivery_type=dtype, address=addr, payment_intent=intent_pay or open_order.get("payment_intent", ""), payments=split or None, notes=o.get("notes") or open_order.get("notes", ""), items=items, delivery_fee=fee, zone_name=zone))
+                order = await update_order(open_order["order_id"], OrderUpdate(delivery_type=dtype, address=addr, payment_intent=intent_pay or open_order.get("payment_intent", ""), payments=split or None, notes=o.get("notes") or open_order.get("notes", ""), items=items, delivery_fee=fee, zone_name=zone, **adj))
             else:  # saying how you'll pay is NOT paying: payment_method stays Pendente until a receipt is verified
-                order = await create_order_record(OrderCreate(customer_name=doc["customer_name"], customer_phone=phone, delivery_type=dtype, address=o.get("address", ""), payment_method="Pendente", payment_intent=intent_pay, payments=split, notes=o.get("notes", ""), items=items, latitude=lat, longitude=lng, status="Em Análise", source="whatsapp"))
+                order = await create_order_record(OrderCreate(customer_name=known_name or doc["customer_name"], customer_phone=phone, delivery_type=dtype, address=o.get("address", ""), payment_method="Pendente", payment_intent=intent_pay, payments=split, notes=o.get("notes", ""), items=items, latitude=lat, longitude=lng, status="Em Análise", source="whatsapp", **adj))
             if lat is not None:  # remember the customer's GPS point in the CRM for the next deliveries
                 await db.customers.update_one({"phone": phone}, {"$set": {"last_lat": lat, "last_lng": lng}})
             brl = lambda v: f"{v:.2f}".replace(".", ",")
