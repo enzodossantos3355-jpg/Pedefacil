@@ -1,7 +1,8 @@
-import { useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { usePlan } from "@/lib/plans";
+import { printerConfig } from "@/lib/thermal";
 import PointCharge from "@/components/PointCharge";
 import { toast } from "sonner";
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from "@/lib/api";
@@ -53,6 +54,18 @@ export default function Pedidos() {
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => apiGet<Order[]>("/orders"), refetchInterval: 8000 });
   const products = useQuery({ queryKey: ["products"], queryFn: () => apiGet<Product[]>("/products") });
   const couriers = useQuery({ queryKey: ["couriers"], queryFn: () => apiGet<Courier[]>("/couriers") });
+  // auto-print: each order that becomes "Novo" prints its comanda once on this device (thermal printer only)
+  useEffect(() => {
+    const cfg = printerConfig();
+    if (!cfg.autoPrint || cfg.mode === "browser" || !orders.data) return;
+    const saved = localStorage.getItem("pf_autoprinted");
+    if (saved === null) { localStorage.setItem("pf_autoprinted", JSON.stringify(orders.data.map((o) => o.order_id))); return; } // first time: don't reprint old orders
+    const done: string[] = JSON.parse(saved);
+    const fresh = orders.data.filter((o) => o.status === "Novo" && !done.includes(o.order_id));
+    if (!fresh.length) return;
+    localStorage.setItem("pf_autoprinted", JSON.stringify([...done, ...fresh.map((o) => o.order_id)].slice(-300)));
+    (async () => { for (const o of fresh) { printKitchenTicket(o); await new Promise((r) => setTimeout(r, 1500)); } })();
+  }, [orders.data]);
   const zones = useQuery({ queryKey: ["zones"], queryFn: () => apiGet<DeliveryZone[]>("/delivery-zones") });
   const mpPending = (orders.data ?? []).some((o) => o.mp_order_id && o.payment_status !== "pago");
   useQuery({ queryKey: ["mp-check"], queryFn: async () => { const r = await apiPost<{ confirmed: number }>("/payments/mercadopago/check"); if (r.confirmed) { client.invalidateQueries({ queryKey: ["orders"] }); toast.success("Pix confirmado pelo Mercado Pago ✅"); } return r; }, enabled: mpPending, refetchInterval: 20000 });
